@@ -90,16 +90,28 @@ bash scripts/push_remote_migrations.sh
 bash scripts/push_remote_migrations.sh
 ```
 
-## DB 반영 확인(가장 간단한 체크)
+## 데이터 누적/정리 정책(자동)
 
-이 저장소는 원격 DB에 `public.ping()` RPC 함수를 올려두고, 이를 호출해 DB/REST 계층이 정상인지 확인합니다.
+현재는 아래 보관 정책으로 **자동 정리(삭제)**가 수행됩니다.
+
+- `dexscreener_ingestion_runs`: **14일 보관**
+- `token_security_scan_queue`: `completed` 기준 **7일 보관**
+- `dexscreener_*_raw`(프로필/부스트/CTO): `updated_at` 기준 **30일 보관**
+- `goplus_token_security_cache`: `scanned_at` 기준 **30일 보관**
+
+정리 작업은 **매일 04:30 KST**에 1회 실행되도록 구성되어 있습니다.
+(DB 크론은 매시간 체크하되, 함수 내부에서 KST 04:30일 때만 실행)
+
+수동으로 결과를 확인하고 싶으면(서비스 롤 필요):
 
 ```bash
-bash scripts/test_remote_supabase.sh
+curl -sS -X POST \
+  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  "$SUPABASE_URL/rest/v1/rpc/dexswipe_cleanup_daily_430am_kst" \
+  -d '{}'
 ```
-
-정상이라면 마지막에 아래가 출력됩니다.
-- `"pong"`
 
 ## DexScreener 수집(매일 05:00 KST)
 
