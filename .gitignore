@@ -1,0 +1,6 @@
+.env
+supabase/.env
+
+# macOS
+.DS_Store
+
