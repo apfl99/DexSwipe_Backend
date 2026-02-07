@@ -92,14 +92,30 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
   echo "2) Push migrations using DATABASE_URL (no link required)"
   export RAW_DB_URL="${DATABASE_URL}"
   DB_URL="$(normalize_db_url)"
-  supabase db push --db-url "${DB_URL}" --yes
-else
-  require_env SUPABASE_DB_PASSWORD
 
-  echo "2) Link project (non-interactive)"
-  supabase link --project-ref "${PROJECT_REF}" --password "${SUPABASE_DB_PASSWORD}" --yes
+  set +e
+  DBURL_OUT="$(
+    supabase db push --db-url "${DB_URL}" --yes 2>&1
+  )"
+  DBURL_CODE="$?"
+  set -e
 
-  echo "3) Push migrations"
+  if [[ "${DBURL_CODE}" -eq 0 ]]; then
+    echo "Done."
+    exit 0
+  fi
+
+  echo "${DBURL_OUT}" >&2
+  echo >&2
+  echo "DATABASE_URL push failed; falling back to password/pooler method..." >&2
+fi
+
+require_env SUPABASE_DB_PASSWORD
+
+echo "2) Link project (non-interactive)"
+supabase link --project-ref "${PROJECT_REF}" --password "${SUPABASE_DB_PASSWORD}" --yes
+
+echo "3) Push migrations"
   set +e
   PUSH_OUT="$(
     supabase db push --password "${SUPABASE_DB_PASSWORD}" --yes 2>&1
@@ -146,7 +162,6 @@ else
       exit "${PUSH_CODE}"
     fi
   fi
-fi
 
 echo "Done."
 
