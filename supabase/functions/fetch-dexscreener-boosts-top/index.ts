@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { fetchJsonWithRetry } from "../_shared/dexscreener.ts";
 
-type Boost = Record<string, unknown> & {
+type BoostTop = Record<string, unknown> & {
   chainId?: string;
   tokenAddress?: string;
   amount?: number;
@@ -16,7 +16,7 @@ function json(body: unknown, init?: ResponseInit) {
   });
 }
 
-const URL = "https://api.dexscreener.com/token-boosts/latest/v1";
+const URL = "https://api.dexscreener.com/token-boosts/top/v1";
 
 Deno.serve(async (req) => {
   const expectedSecret = Deno.env.get("DEXSWIPE_CRON_SECRET") ?? "";
@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
       status: "running",
       started_at: startedAt.toISOString(),
       source: "dexscreener",
-      endpoint: "/token-boosts/latest/v1",
+      endpoint: "/token-boosts/top/v1",
     })
     .select("id")
     .single();
@@ -50,9 +50,9 @@ Deno.serve(async (req) => {
 
   try {
     const payload = await fetchJsonWithRetry(URL);
-    const boosts: Boost[] = Array.isArray(payload) ? payload as Boost[] : [payload as Boost];
+    const items: BoostTop[] = Array.isArray(payload) ? (payload as BoostTop[]) : ([payload as BoostTop] as BoostTop[]);
 
-    const rows = boosts
+    const rows = items
       .map((b) => ({
         chain_id: b.chainId ?? null,
         token_address: b.tokenAddress ?? null,
@@ -65,18 +65,13 @@ Deno.serve(async (req) => {
       }))
       .filter((r) => typeof r.chain_id === "string" && typeof r.token_address === "string");
 
-    // Deduplicate within the same payload to avoid:
-    // "ON CONFLICT DO UPDATE command cannot affect row a second time"
+    // Dedup within payload
     const deduped = new Map<string, typeof rows[number]>();
-    for (const r of rows) {
-      deduped.set(`${r.chain_id}:${r.token_address}`, r);
-    }
+    for (const r of rows) deduped.set(`${r.chain_id}:${r.token_address}`, r);
     const finalRows = [...deduped.values()];
 
     if (finalRows.length) {
-      const up = await supabase
-        .from("dexscreener_token_boosts_raw")
-        .upsert(finalRows, { onConflict: "chain_id,token_address" });
+      const up = await supabase.from("dexscreener_token_boosts_top_raw").upsert(finalRows, { onConflict: "chain_id,token_address" });
       if (up.error) throw new Error(up.error.message);
 
       // Enqueue market updates (base/solana only for now)
@@ -97,12 +92,12 @@ Deno.serve(async (req) => {
       .update({
         status: "completed",
         finished_at: new Date().toISOString(),
-        fetched_count: boosts.length,
+        fetched_count: items.length,
         upserted_count: finalRows.length,
       })
       .eq("id", runId);
 
-    return json({ ok: true, fetched: boosts.length, stored: finalRows.length, run_id: runId });
+    return json({ ok: true, fetched: items.length, stored: finalRows.length, run_id: runId });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await supabase

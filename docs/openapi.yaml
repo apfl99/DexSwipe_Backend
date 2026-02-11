@@ -1,0 +1,147 @@
+openapi: 3.0.3
+info:
+  title: DexSwipe Backend API
+  version: 0.1.0
+  description: |
+    Supabase Edge Functions 기반 API.
+    - Public API: get-feed
+servers:
+  - url: https://{project_ref}.supabase.co
+    variables:
+      project_ref:
+        default: kkpjxhmgxtqhlaimotbf
+paths:
+  /functions/v1/get-feed:
+    get:
+      summary: Get swipe feed tokens
+      description: |
+        Returns token cards composed from DexScreener raw sources + market data + GoPlus cache.
+        Tokens with `security.always_deny=true` are excluded.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 30
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - in: query
+          name: chains
+          description: Comma-separated chain ids (e.g. "solana,base")
+          schema:
+            type: string
+        - in: query
+          name: min_liquidity_usd
+          schema:
+            type: number
+        - in: query
+          name: min_volume_24h
+          schema:
+            type: number
+        - in: query
+          name: min_fdv
+          schema:
+            type: number
+        - in: query
+          name: include_risky
+          description: If true, include tokens flagged as phishing/rugpull risk (default false).
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeedItem"
+                  limit:
+                    type: integer
+                  next_offset:
+                    type: integer
+                  notes:
+                    type: object
+components:
+  schemas:
+    FeedItem:
+      type: object
+      required: [chain_id, token_address, fetched_at, profile]
+      properties:
+        chain_id:
+          type: string
+        token_address:
+          type: string
+        fetched_at:
+          type: string
+          format: date-time
+        profile:
+          description: DexScreener token profile raw object
+          type: object
+          additionalProperties: true
+        boost:
+          nullable: true
+          description: DexScreener boost raw object (if present)
+          type: object
+          additionalProperties: true
+        takeover:
+          nullable: true
+          description: DexScreener community takeover raw object (if present)
+          type: object
+          additionalProperties: true
+        market:
+          nullable: true
+          type: object
+          properties:
+            price_usd: { type: number, nullable: true }
+            liquidity_usd: { type: number, nullable: true }
+            volume_24h: { type: number, nullable: true }
+            fdv: { type: number, nullable: true }
+            market_cap: { type: number, nullable: true }
+            updated_at: { type: string, format: date-time }
+            raw_best_pair:
+              type: object
+              additionalProperties: true
+        security:
+          nullable: true
+          type: object
+          properties:
+            always_deny: { type: boolean }
+            deny_reasons:
+              type: array
+              items: { type: string }
+            scanned_at:
+              type: string
+              format: date-time
+              nullable: true
+        quality:
+          nullable: true
+          type: object
+          properties:
+            website_url:
+              type: string
+              nullable: true
+            url_risk:
+              nullable: true
+              type: object
+              properties:
+                is_phishing: { type: boolean, nullable: true }
+                dapp_risk_level: { type: string, nullable: true }
+                scanned_at: { type: string, format: date-time, nullable: true }
+            rugpull:
+              nullable: true
+              type: object
+              properties:
+                is_rugpull_risk: { type: boolean, nullable: true }
+                risk_level: { type: string, nullable: true }
+                scanned_at: { type: string, format: date-time, nullable: true }
+

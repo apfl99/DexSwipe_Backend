@@ -10,6 +10,8 @@
   - GoPlus: 토큰 보안 스캔(큐 + 워커) → 원본 JSONB + `always_deny` 정책 저장
 - **서빙(프론트 사용 가능)**
   - `GET /functions/v1/get-feed`: 토큰 카드 리스트 반환(Always‑Deny 제외)
+  - OpenAPI: `docs/openapi.yaml`
+  - 프론트용 요약 문서: `docs/API.md`
 
 ## 원격 Supabase로 진행하기 (로컬 없이)
 
@@ -39,6 +41,8 @@ cp .env.example .env
 
 파이프라인 동작을 위해 추가로 필요:
 - `DEXSWIPE_CRON_SECRET`
+  - Edge Function이 `x-cron-secret`를 검증할 때 사용
+  - DB 크론(pg_net)이 Edge Function을 호출할 때도 사용(Vault에 저장)
 
 ### 3) 간단 연결 테스트 (curl 기반)
 
@@ -113,12 +117,12 @@ curl -sS -X POST \
   -d '{}'
 ```
 
-## DexScreener 수집(매일 05:00 KST)
+## DexScreener 수집(주기 실행)
 
 ### 목표
 
 - DexScreener `token-profiles/latest/v1`에서 내려오는 **원본 데이터 전체를 JSONB로 저장**
-- **매일 05:00(KST)**에 자동으로 수집 작업이 실행되도록 구성
+- 무료 레이트리밋 범위 내에서 **짧은 주기로 갱신**(현재: 5분/15분)
 
 ### 저장 테이블
 
@@ -137,8 +141,13 @@ curl -sS -X POST \
 Supabase 공식 문서 권장 방식대로 `pg_cron` + `pg_net`로 Edge Function을 호출합니다.
 관련 문서: [Scheduling Edge Functions](https://supabase.com/docs/guides/functions/schedule-functions)
 
-스케줄은 **매 시각 정각(매시간 00분)**에 체크하고, 함수 내부에서 **05:00 KST일 때만** 실제 호출하도록 구현했습니다
-(DB 타임존이 UTC여도 05:00 KST를 정확히 맞추기 위함).
+스케줄은 레이트리밋을 넘지 않는 선에서 아래처럼 구성되어 있습니다.
+- profiles(latest): 15분마다
+- boosts(latest): 30분마다
+- boosts(top): 60분마다
+- takeovers(latest): 60분마다
+- market(tokens/v1): 15분마다
+- GoPlus worker: 30분마다
 
 #### 필요한 Vault 시크릿
 
@@ -171,6 +180,27 @@ curl -sS -X POST \
 - `goplus-security-worker`가 큐를 주기적으로 가져와(Processing) GoPlus API를 호출하고,
   결과를 `goplus_token_security_cache`에 저장합니다.
 - **Always-Deny 원칙(치명 리스크 즉시 제외)**을 위해 `always_deny`, `deny_reasons`를 함께 저장합니다.
+- 워커는 `token_security_scan_queue.next_run_at`이 지난 항목을 다시 가져와 **주기적으로 재스캔**합니다.
+  - 성공 시 `last_scanned_at`이 갱신되고, 기본 재스캔 주기는 현재 **6시간**입니다(워커에서 설정).
+  - 무료티어 최적화를 위해 `GOPLUS_CU_BUDGET_PER_RUN`으로 1회 실행당 처리량을 제한합니다.
+  - 또한 품질/비용 최적화를 위해, **market 워커가 유동성/거래량 기준을 통과한 토큰만** `token_security_scan_queue`에 넣도록 게이트가 적용되어 있습니다.
+
+## GoPlus 품질 신호(피싱/디앱/러그) 캐시
+
+GoPlus 문서의 아래 API를 **저빈도 + 캐시(TTL)** 로 호출해 “링크/러그” 품질을 올립니다.
+- Phishing Site Detection API: `GET /api/v1/phishing_site` ([문서](https://docs.gopluslabs.io/reference/phishing-site-detection-api))
+- dApp Security Info API: `GET /api/v1/dapp_security` ([문서](https://docs.gopluslabs.io/reference/dapp-security-info-api))
+- Rug-Pull Detection API (Beta): `GET /api/v1/rugpull_detecting/{chain_id}` ([문서](https://docs.gopluslabs.io/reference/api-overview))
+
+구성 요소:
+- 큐: `public.token_quality_scan_queue`
+- 캐시:
+  - `public.goplus_url_risk_cache` (url 단위)
+  - `public.goplus_rugpull_cache` (chain/token 단위)
+- 워커: `supabase/functions/goplus-quality-worker` (크론: 2시간마다)
+
+`get-feed`는 기본적으로 **피싱(true) 또는 러그리스크(true)** 가 잡힌 토큰을 제외합니다.
+필요하면 `include_risky=true`로 포함시킬 수 있습니다.
 
 ### 관련 테이블
 
@@ -187,6 +217,10 @@ Edge Function 시크릿으로 등록하는 것을 권장합니다.
 ```bash
 supabase secrets set GOPLUS_API_KEY="<YOUR_GOPLUS_API_KEY>" --yes
 ```
+
+> 참고: Supabase CLI는 `SUPABASE_`로 시작하는 시크릿 이름을 예약 처리하여
+> `supabase secrets set SUPABASE_URL=...` 같은 명령이 실패/스킵될 수 있습니다.
+> 따라서 **우리가 추가로 넣어야 하는 시크릿은 `DEXSWIPE_CRON_SECRET`, `GOPLUS_API_KEY`** 입니다.
 
 ### 워커 수동 실행(테스트)
 
@@ -287,18 +321,28 @@ supabase db push
   - `limit` (기본 30, 최대 100)
   - `offset` (기본 0)
   - `chains` (예: `solana,base`)
+  - `min_liquidity_usd` (선택) 최소 유동성(USD)
+  - `min_volume_24h` (선택) 24h 거래량 최소값(USD)
+  - `min_fdv` (선택) FDV 최소값(USD)
 - **응답(요약)**
   - `tokens[]`:
     - `chain_id`, `token_address`, `fetched_at`
     - `profile`: DexScreener `/token-profiles/latest/v1` 원본 객체
     - `boost`: DexScreener `/token-boosts/latest/v1` 원본 객체(없으면 null)
     - `takeover`: DexScreener `/community-takeovers/latest/v1` 원본 객체(없으면 null)
+    - `market`: `tokens/v1` 기반 시장 데이터 요약 + `raw_best_pair`
     - `security`: GoPlus 캐시 요약(없으면 null)
 
 #### curl 예시
 
 ```bash
 curl -sS "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base"
+```
+
+유동성 필터 예시:
+
+```bash
+curl -sS "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base&min_liquidity_usd=10000"
 ```
 
 #### supabase-js(프론트) 예시
@@ -325,14 +369,29 @@ const { data, error } = await supabase.functions.invoke("get-feed", {
 ### 내가 직접 확인하는 방법(요약)
 
 1) `.env` 준비
-- `.env.example`를 복사해서 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DEXSWIPE_CRON_SECRET` 채우기
+- `.env.example`를 복사해서 아래 값 채우기
+  - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DEXSWIPE_CRON_SECRET`, `SUPABASE_DB_PASSWORD`
 
-2) 배포/반영
+2) (원격) Edge Function 시크릿 등록
+- `DEXSWIPE_CRON_SECRET` (필수)
+- `GOPLUS_API_KEY` (권장)
+
+```bash
+supabase secrets set DEXSWIPE_CRON_SECRET="$DEXSWIPE_CRON_SECRET" --yes
+supabase secrets set GOPLUS_API_KEY="<YOUR_GOPLUS_API_KEY>" --yes
+```
+
+3) 배포/반영
 - `bash scripts/push_remote_migrations.sh`
 - `supabase functions deploy fetch-dexscreener-latest --no-verify-jwt --use-api --yes`
 - `supabase functions deploy fetch-dexscreener-boosts --no-verify-jwt --use-api --yes`
 - `supabase functions deploy fetch-dexscreener-takeovers --no-verify-jwt --use-api --yes`
 - `supabase functions deploy goplus-security-worker --no-verify-jwt --use-api --yes`
 
-3) 검증(원클릭)
+4) 검증(원클릭)
 - `bash scripts/verify_pipeline.sh`
+
+## API 문서(프론트)
+
+- `docs/API.md`
+- `docs/openapi.yaml`

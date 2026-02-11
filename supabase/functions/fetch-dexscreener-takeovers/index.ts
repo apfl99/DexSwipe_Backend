@@ -68,6 +68,18 @@ Deno.serve(async (req) => {
         .from("dexscreener_community_takeovers_raw")
         .upsert(rows, { onConflict: "chain_id,token_address" });
       if (up.error) throw new Error(up.error.message);
+
+      // Enqueue market updates (base/solana only for now)
+      const marketChains = new Set(["solana", "base"]);
+      const qRows = rows
+        .filter((r) => marketChains.has(r.chain_id as string))
+        .map((r) => ({ chain_id: r.chain_id as string, token_address: r.token_address as string }));
+      if (qRows.length) {
+        const mq = await supabase
+          .from("dexscreener_market_update_queue")
+          .upsert(qRows, { onConflict: "chain_id,token_address", ignoreDuplicates: true });
+        if (mq.error) throw new Error(`enqueue market failed: ${mq.error.message}`);
+      }
     }
 
     await supabase

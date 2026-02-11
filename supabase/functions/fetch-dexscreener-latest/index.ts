@@ -115,23 +115,24 @@ Deno.serve(async (req) => {
       upserted += batch.length;
     }
 
-    // Enqueue security scan jobs (deduped by PK on queue table).
-    // This is the "Distribution" step in the assembly-line pattern.
-    const toEnqueue = new Map<string, { chain_id: string; token_address: string }>();
+    // Enqueue market updates for chains where we fetch market data.
+    // (We use DexScreener /tokens/v1 which supports up to 30 addresses per call.)
+    const marketChains = new Set(["solana", "base"]);
+    const marketToEnqueue = new Map<string, { chain_id: string; token_address: string }>();
     for (const r of rows) {
       const chainId = r.chain_id as string;
-      if (!supportedChains.has(chainId)) continue;
-      toEnqueue.set(`${chainId}:${r.token_address}`, {
+      if (!marketChains.has(chainId)) continue;
+      marketToEnqueue.set(`${chainId}:${r.token_address}`, {
         chain_id: chainId,
         token_address: r.token_address as string,
       });
     }
-    const enqueueRows = [...toEnqueue.values()];
-    if (enqueueRows.length) {
-      const enq = await supabase
-        .from("token_security_scan_queue")
-        .upsert(enqueueRows, { onConflict: "chain_id,token_address", ignoreDuplicates: true });
-      if (enq.error) throw new Error(`enqueue failed: ${enq.error.message}`);
+    const marketRows = [...marketToEnqueue.values()];
+    if (marketRows.length) {
+      const mq = await supabase
+        .from("dexscreener_market_update_queue")
+        .upsert(marketRows, { onConflict: "chain_id,token_address", ignoreDuplicates: true });
+      if (mq.error) throw new Error(`enqueue market failed: ${mq.error.message}`);
     }
 
     await supabase
@@ -148,7 +149,7 @@ Deno.serve(async (req) => {
       ok: true,
       fetched: profiles.length,
       stored: upserted,
-      enqueued_security_scans: enqueueRows.length,
+      enqueued_market_updates: marketRows.length,
       run_id: runId,
     });
   } catch (err) {

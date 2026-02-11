@@ -97,6 +97,15 @@ function computePolicy(fields: {
 const DEFAULT_BATCH = 20;
 const MAX_JOBS_PER_INVOCATION = 50;
 
+function estimateCu(chainId: string): number {
+  // Based on your GoPlus dashboard:
+  // - Solana Token Security: 30 CU / token
+  // - EVM Token Security: 15 CU / token
+  // (We treat unknown as EVM-cost for safety.)
+  if (chainId === "solana") return 30;
+  return 15;
+}
+
 Deno.serve(async (req) => {
   const expectedSecret = Deno.env.get("DEXSWIPE_CRON_SECRET") ?? "";
   if (expectedSecret) {
@@ -112,6 +121,12 @@ Deno.serve(async (req) => {
   const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
 
   const apiKey = Deno.env.get("GOPLUS_API_KEY") ?? null;
+  const cuBudget = (() => {
+    const v = Deno.env.get("GOPLUS_CU_BUDGET_PER_RUN") ?? "300";
+    const n = Number.parseInt(v, 10);
+    return Number.isFinite(n) && n > 0 ? n : 300;
+  })();
+  let cuUsed = 0;
 
   const batchSize = (() => {
     const u = new URL(req.url);
@@ -143,7 +158,13 @@ Deno.serve(async (req) => {
 
     for (const job of jobs) {
       if (total >= MAX_JOBS_PER_INVOCATION) break;
+      const jobCu = estimateCu(job.chain_id);
+      if (cuUsed + jobCu > cuBudget) {
+        // Stop this invocation; remaining jobs will be picked up next cron run.
+        break;
+      }
       total++;
+      cuUsed += jobCu;
 
       const chainId = job.chain_id;
       const tokenAddress = job.token_address;
@@ -255,11 +276,22 @@ Deno.serve(async (req) => {
     }
   }
 
+  // Heartbeat row: proves the worker ran (cron vs manual).
+  // Stored in DB for easy verification from anywhere.
+  await supabase.from("edge_function_heartbeats").insert({
+    function_name: "goplus-security-worker",
+    processed_count: processed.length,
+    note: `${apiKey ? "api_key_set" : "api_key_missing"};cu=${cuUsed}/${cuBudget}`,
+  });
+
   return json({
     ok: true,
     processed_count: processed.length,
     processed,
+    cu_used: cuUsed,
+    cu_budget: cuBudget,
     note: apiKey ? "GOPLUS_API_KEY set" : "GOPLUS_API_KEY not set (may fail if GoPlus requires auth)",
   });
 });
+
 
