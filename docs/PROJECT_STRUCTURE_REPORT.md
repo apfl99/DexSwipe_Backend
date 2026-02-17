@@ -1,5 +1,9 @@
 ## Project Structure Report (DexSwipe Backend RC)
 
+### Pipeline 문서
+
+- `docs/PIPELINE.md` 참고 (크론 스케줄/데이터 흐름/테이블/환경변수까지 포함)
+
 ### Active Public API
 
 - **Edge Function**: `supabase/functions/get-feed/index.ts`
