@@ -44,12 +44,67 @@ curl -sS -H "x-client-id: device-abc" \
 ```
 
 `format=min`일 때는 응답이 **flat JSON array**이고, 다음 페이지 커서는 응답 헤더 `x-next-cursor`로 내려옵니다.
+또한 `safety_score(0~100)` 및 `is_surging(true/false)`가 포함됩니다.
 
 위험 자산도 포함해서 확인(운영/디버그용):
 
 ```bash
 curl -sS -H "x-client-id: device-abc" \
   "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base&include_risky=true"
+```
+
+#### `GET /functions/v1/wishlist`
+
+디바이스(= `x-client-id`) 기준 위시리스트 조회.
+
+- **Headers**
+  - `x-client-id`: 필수
+- **Query**
+  - `limit`: 1~200 (기본 100)
+
+```bash
+curl -sS -H "x-client-id: device-abc" \
+  "$SUPABASE_URL/functions/v1/wishlist?limit=50"
+```
+
+#### `GET /functions/v1/get-wishlist`
+
+위시리스트 ROI 조회(= “헌터 트래킹 엔진”).
+
+- **특징**
+  - **Lazy Refresh**: 위시리스트에 있는 토큰 중 `tokens.updated_at`이 5분 이상 지난 항목만 선택적으로 DexScreener에서 가격을 갱신합니다.
+  - `roi_since_captured = ((current_price - captured_price) / captured_price) * 100`
+  - `is_surging = (price_change_5m > price_change_1h)`
+
+- **Headers**
+  - `x-client-id`: 필수
+- **Query**
+  - `limit`: 1~200 (기본 100)
+
+```bash
+curl -sS -H "x-client-id: device-abc" \
+  "$SUPABASE_URL/functions/v1/get-wishlist?limit=50"
+```
+
+#### `POST /functions/v1/wishlist`
+
+위시리스트 추가.
+
+```bash
+curl -sS -X POST -H "x-client-id: device-abc" -H "Content-Type: application/json" \
+  -d '{"token_id":"solana:So11111111111111111111111111111111111111112"}' \
+  "$SUPABASE_URL/functions/v1/wishlist"
+```
+
+> 저장 시점에 `captured_price`, `captured_at`이 DB에 고정 기록됩니다(토큰 스냅샷이 없으면 DexScreener에서 1회 조회).
+
+#### `DELETE /functions/v1/wishlist?token_id=...`
+
+위시리스트 삭제.
+
+```bash
+curl -sS -X DELETE -H "x-client-id: device-abc" \
+  "$SUPABASE_URL/functions/v1/wishlist?token_id=solana:So11111111111111111111111111111111111111112"
 ```
 
 ### OpenAPI

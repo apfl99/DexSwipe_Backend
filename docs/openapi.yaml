@@ -85,6 +85,123 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/FeedResponseFull"
                   - $ref: "#/components/schemas/FeedResponseMin"
+  /functions/v1/wishlist:
+    get:
+      summary: List wishlist items (per device)
+      parameters:
+        - in: header
+          name: x-client-id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [token_id, created_at]
+                      properties:
+                        token_id: { type: string }
+                        created_at: { type: string, format: date-time }
+                        captured_price: { type: number, nullable: true }
+                        captured_at: { type: string, format: date-time, nullable: true }
+                  limit: { type: integer }
+    post:
+      summary: Add to wishlist (per device)
+      parameters:
+        - in: header
+          name: x-client-id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token_id]
+              properties:
+                token_id: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  token_id: { type: string }
+                  created_at: { type: string, format: date-time }
+                  captured_price: { type: number, nullable: true }
+                  captured_at: { type: string, format: date-time }
+    delete:
+      summary: Remove from wishlist (per device)
+      parameters:
+        - in: header
+          name: x-client-id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  token_id: { type: string }
+  /functions/v1/get-wishlist:
+    get:
+      summary: Get wishlist ROI (lazy refresh)
+      parameters:
+        - in: header
+          name: x-client-id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WishlistItem"
+                  limit: { type: integer }
+                  refreshed:
+                    type: object
+                    properties:
+                      requested: { type: integer }
+                      updated: { type: integer }
 components:
   schemas:
     FeedResponseFull:
@@ -129,7 +246,15 @@ components:
         volume_24h: { type: number, nullable: true }
         fdv: { type: number, nullable: true }
         market_cap: { type: number, nullable: true }
+        price_change_5m: { type: number, nullable: true }
+        price_change_15m: { type: number, nullable: true }
         price_change_1h: { type: number, nullable: true }
+        is_surging: { type: boolean, nullable: true }
+        safety_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
         buys_24h: { type: integer, nullable: true }
         sells_24h: { type: integer, nullable: true }
         pair_created_at: { type: string, nullable: true, format: date-time }
@@ -166,12 +291,42 @@ components:
                 scanned_at: { type: string, format: date-time, nullable: true }
     FeedItemMin:
       type: object
-      required: [id, chain_id]
+      required: [id, chain_id, is_security_risk, safety_score, is_surging]
       properties:
         id: { type: string }
         chain_id: { type: string }
         logo_url: { type: string, nullable: true }
         symbol: { type: string, nullable: true }
+        price_change_5m: { type: number, nullable: true }
+        price_change_15m: { type: number, nullable: true }
         price_change_1h: { type: number, nullable: true }
         is_security_risk: { type: boolean }
+        safety_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        is_surging: { type: boolean }
+
+    WishlistItem:
+      type: object
+      required: [token_id, chain_id, token_address, captured_price, current_price, roi_since_captured, safety_score, is_surging, updated_at]
+      properties:
+        token_id: { type: string }
+        chain_id: { type: string }
+        token_address: { type: string }
+        symbol: { type: string, nullable: true }
+        logo_url: { type: string, nullable: true }
+        captured_price: { type: number, nullable: true }
+        captured_at: { type: string, format: date-time, nullable: true }
+        current_price: { type: number, nullable: true }
+        roi_since_captured: { type: number, nullable: true }
+        price_change_5m: { type: number, nullable: true }
+        price_change_1h: { type: number, nullable: true }
+        is_surging: { type: boolean }
+        is_security_risk: { type: boolean }
+        safety_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        updated_at: { type: string, format: date-time }
 

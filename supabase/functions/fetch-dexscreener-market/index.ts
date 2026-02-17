@@ -193,6 +193,9 @@ Deno.serve(async (req) => {
               .eq("token_address", it.token);
 
             // Release tokens table upsert (denormalized fields for fast get-feed).
+            // DexScreener `priceChange` keys vary by chain/provider; we extract best-effort.
+            const price_change_5m = num((best.priceChange as any)?.m5 ?? (best.priceChange as any)?.["5m"]);
+            const price_change_15m = num((best.priceChange as any)?.m15 ?? (best.priceChange as any)?.["15m"]);
             const price_change_1h = num((best.priceChange as any)?.h1);
             const buys_24h = int((best.txns as any)?.h24?.buys);
             const sells_24h = int((best.txns as any)?.h24?.sells);
@@ -220,6 +223,8 @@ Deno.serve(async (req) => {
                   volume_24h,
                   fdv,
                   market_cap,
+                  price_change_5m,
+                  price_change_15m,
                   price_change_1h,
                   buys_24h,
                   sells_24h,

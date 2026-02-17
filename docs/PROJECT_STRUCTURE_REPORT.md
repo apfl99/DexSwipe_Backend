@@ -6,11 +6,18 @@
   - Required header: `x-client-id`
   - Pagination: cursor(keyset) using `tokens.updated_at`
 - Anti-join: `NOT EXISTS` on `seen_tokens(user_device_id, token_id)`
+  - Smart fields: `is_surging`, `safety_score` (0~100)
+
+- **Edge Function**: `supabase/functions/wishlist/index.ts`
+  - `GET/POST/DELETE /functions/v1/wishlist`
+  - Required header: `x-client-id`
 
 ### Active Pipeline (Cron / Workers)
 
 - **DexScreener ingestion (lean, free-tier)**
   - `supabase/functions/scheduled-fetch/index.ts` (round-robin enqueue)
+    - Solana/Base: `/token-profiles/latest/v1`
+    - Sui/Tron: `/latest/dex/search` + chainId filter (fallback query 포함)
   - `supabase/functions/fetch-dexscreener-market/index.ts` (drains queue, upserts `tokens`)
   - Shared: `supabase/functions/_shared/dexscreener.ts` (retry/backoff)
 - **GoPlus**
@@ -26,6 +33,7 @@
 - **Release-oriented**
   - `public.tokens`
   - `public.seen_tokens`
+  - `public.wishlist`
   - `public.security_cache` (view -> `public.goplus_token_security_cache`)
   - `public.dexswipe_get_feed(...)` (RPC)
 - **Ingestion**

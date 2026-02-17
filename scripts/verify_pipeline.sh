@@ -73,6 +73,22 @@ echo -n "  tokens: "
 curl -sS -G "${authH[@]}" --data-urlencode "select=count" \
   "${SUPABASE_URL}/rest/v1/tokens"
 echo
+echo -n "  market_update_queue(sol): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.solana" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
+echo -n "  market_update_queue(base): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.base" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
+echo -n "  market_update_queue(sui): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.sui" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
+echo -n "  market_update_queue(tron): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.tron" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
 
 echo -n "  edge_function_heartbeats: "
 curl -sS -G "${authH[@]}" --data-urlencode "select=count" \
@@ -84,6 +100,18 @@ echo "6) Smoke: call get-feed format=min (requires x-client-id)"
 curl -sS -i -H "x-client-id: verify-rc" \
   "${SUPABASE_URL}/functions/v1/get-feed?limit=2&chains=solana,base&format=min" \
   | sed -n '1,12p' | sed 's/.*/  &/'
+echo
+
+echo "7) Smoke: wishlist capture + ROI (get-wishlist)"
+cid="verify-wishlist"
+tok="solana:So11111111111111111111111111111111111111112"
+curl -sS -X POST -H "x-client-id: ${cid}" -H "Content-Type: application/json" \
+  -d "{\"token_id\":\"${tok}\"}" \
+  "${SUPABASE_URL}/functions/v1/wishlist" | sed -n '1,2p' | sed 's/.*/  &/'
+curl -sS -H "x-client-id: ${cid}" \
+  "${SUPABASE_URL}/functions/v1/get-wishlist?limit=5" | sed -n '1,5p' | sed 's/.*/  &/'
+curl -sS -X DELETE -H "x-client-id: ${cid}" \
+  "${SUPABASE_URL}/functions/v1/wishlist?token_id=${tok}" | sed -n '1,2p' | sed 's/.*/  &/'
 echo
 
 echo "Done."

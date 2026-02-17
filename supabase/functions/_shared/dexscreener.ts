@@ -24,7 +24,11 @@ export async function fetchJsonWithRetry(
     const t = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, {
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          // DexScreener sometimes returns 403 without a browser-like UA.
+          "User-Agent": "DexSwipe/1.0 (+https://dexswipe.app)",
+        },
         signal: controller.signal,
       });
       if (res.ok) return await res.json();

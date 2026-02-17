@@ -46,6 +46,8 @@ type FeedRow = {
   volume_24h: number | null;
   fdv: number | null;
   market_cap: number | null;
+  price_change_5m: number | null;
+  price_change_15m: number | null;
   price_change_1h: number | null;
   buys_24h: number | null;
   sells_24h: number | null;
@@ -61,6 +63,58 @@ type FeedRow = {
   rug_risk_level: string | null;
   rug_scanned_at: string | null;
 };
+
+function clampScore(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 100) return 100;
+  return Math.round(n);
+}
+
+function safetyScore(r: FeedRow): number {
+  // 0..100 (higher is safer). Deterministic and cheap.
+  // - hard fail: always_deny / phishing / rugpull-risk => 0
+  if (r.security_always_deny) return 0;
+  if (r.url_is_phishing) return 0;
+  if (r.rug_is_rugpull_risk) return 0;
+
+  let score = 100;
+
+  // Penalize dApp risk level if present.
+  const d = (r.url_dapp_risk_level ?? "").toLowerCase();
+  if (d === "high" || d === "danger") score -= 40;
+  else if (d === "medium" || d === "warning") score -= 20;
+  else if (d === "low") score -= 5;
+
+  // Penalize rugpull risk level if present.
+  const rr = (r.rug_risk_level ?? "").toLowerCase();
+  if (rr === "high") score -= 40;
+  else if (rr === "medium") score -= 20;
+  else if (rr === "low") score -= 5;
+
+  // Security deny reasons (soft penalty if present but not always_deny).
+  const reasons = r.security_deny_reasons ?? [];
+  if (reasons.length >= 3) score -= 20;
+  else if (reasons.length === 2) score -= 12;
+  else if (reasons.length === 1) score -= 6;
+
+  return clampScore(score);
+}
+
+function isSurging(r: FeedRow): boolean {
+  // Velocity/acceleration heuristic using 5m/15m/1h price change (best-effort).
+  // Surging when short-term move outpaces longer windows consistently.
+  const p5 = r.price_change_5m;
+  const p1h = r.price_change_1h;
+  // Some providers don't return `m15`; fallback to a linear estimate from 1h.
+  const p15 = r.price_change_15m ?? (p1h !== null ? p1h / 4 : null);
+  if (p5 === null || p15 === null || p1h === null) return false;
+  if (!Number.isFinite(p5) || !Number.isFinite(p15) || !Number.isFinite(p1h)) return false;
+
+  // Require positive momentum and acceleration.
+  // - p5 >= 0.6% AND p5 > p15/3 AND p15 > p1h/4
+  return p5 >= 0.6 && p5 > p15 / 3 && p15 > p1h / 4;
+}
 
 Deno.serve(async (req) => {
   const clientId = req.headers.get("x-client-id")?.trim() ?? "";
@@ -119,8 +173,12 @@ Deno.serve(async (req) => {
         chain_id: r.chain_id,
         logo_url: r.logo_url,
         symbol: r.symbol,
+        price_change_5m: r.price_change_5m,
+        price_change_15m: r.price_change_15m,
         price_change_1h: r.price_change_1h,
         is_security_risk: isSecurityRisk,
+        safety_score: safetyScore(r),
+        is_surging: isSurging(r),
       };
     });
     return jsonWithHeaders(out, {
@@ -142,7 +200,11 @@ Deno.serve(async (req) => {
       volume_24h: r.volume_24h,
       fdv: r.fdv,
       market_cap: r.market_cap,
+      price_change_5m: r.price_change_5m,
+      price_change_15m: r.price_change_15m,
       price_change_1h: r.price_change_1h,
+      is_surging: isSurging(r),
+      safety_score: safetyScore(r),
       buys_24h: r.buys_24h,
       sells_24h: r.sells_24h,
       pair_created_at: r.pair_created_at,
@@ -170,7 +232,7 @@ Deno.serve(async (req) => {
     next_cursor: nextCursor,
     notes: {
       pagination: "cursor (keyset) using tokens.updated_at",
-      anti_join: "NOT EXISTS seen_tokens(user_device_id, token_id)",
+      anti_join: "LEFT JOIN seen_tokens(user_device_id, token_id) where seen is null",
     },
   });
 });
