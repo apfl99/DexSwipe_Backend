@@ -70,6 +70,74 @@ function num(v: unknown): number | null {
   return null;
 }
 
+function flag(v: unknown): boolean | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v === 1;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "1" || s === "true" || s === "yes") return true;
+    if (s === "0" || s === "false" || s === "no") return false;
+  }
+  return null;
+}
+
+async function fetchGoPlusJson(url: string, apiKey: string | null, timeoutMs: number): Promise<unknown> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const attempts: Array<Record<string, string>> = apiKey
+      ? [
+          { ...headers, Authorization: `Bearer ${apiKey}` },
+          { ...headers, "X-API-KEY": apiKey },
+          { ...headers, apikey: apiKey },
+        ]
+      : [headers];
+    let lastText = "";
+    for (const h of attempts) {
+      const res = await fetch(url, { headers: h, signal: controller.signal });
+      if (res.ok) return await res.json();
+      lastText = await res.text().catch(() => "");
+      if (res.status === 401 || res.status === 403) continue;
+      throw new Error(`GoPlus HTTP ${res.status}: ${lastText}`);
+    }
+    throw new Error(`GoPlus unauthorized: ${lastText}`);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function extractGoPlusResult(payload: unknown, tokenAddress: string): Record<string, unknown> | null {
+  if (!payload || typeof payload !== "object") return null;
+  const obj = payload as any;
+  const result = obj.result;
+  if (result && typeof result === "object") {
+    const lower = tokenAddress.toLowerCase();
+    const direct = result[lower] ?? result[tokenAddress] ?? result[tokenAddress.toLowerCase()];
+    if (direct && typeof direct === "object") return direct as Record<string, unknown>;
+  }
+  return obj;
+}
+
+function safetyScoreFromGoPlus(x: {
+  is_honeypot: boolean | null;
+  cannot_sell: boolean | null;
+  is_blacklisted: boolean | null;
+  sell_tax: number | null;
+}): number {
+  let score = 100;
+  if (x.cannot_sell) score = 0;
+  if (x.is_honeypot) score = 0;
+  if (x.is_blacklisted) score = 0;
+  if (typeof x.sell_tax === "number") {
+    if (x.sell_tax >= 0.5) score -= 70;
+    else if (x.sell_tax >= 0.2) score -= 35;
+    else if (x.sell_tax >= 0.1) score -= 20;
+  }
+  return clampScore(score);
+}
+
 function bestPairForToken(pairs: Pair[], chainId: string, tokenAddress: string): Pair | null {
   let best: { liq: number; p: Pair } | null = null;
   for (const p of pairs) {
@@ -186,22 +254,8 @@ Deno.serve(async (req) => {
 
   const tokenMap = new Map(tokenRows.map((r) => [r.token_id, r]));
 
-  // 3) Lazy refresh: only stale (>=5m) or missing
-  const staleMs = 5 * 60 * 1000;
-  const nowMs = Date.now();
-  const staleTargets: Array<{ token_id: string; chain_id: string; token_address: string }> = [];
-  for (const w of parsedTargets) {
-    const t = tokenMap.get(w.token_id);
-    if (!t) {
-      // Not in tokens snapshot yet -> fetch on-demand.
-      staleTargets.push({ token_id: w.token_id, chain_id: w.chain_id, token_address: w.token_address });
-      continue;
-    }
-    const ts = new Date(t.updated_at).getTime();
-    const isStale = !Number.isFinite(ts) || nowMs - ts >= staleMs;
-    const missing = t.price_usd === null;
-    if (isStale || missing) staleTargets.push({ token_id: t.token_id, chain_id: t.chain_id, token_address: t.token_address });
-  }
+  // 3) Live-Sync: always refresh current price for all wishlist tokens.
+  const staleTargets: Array<{ token_id: string; chain_id: string; token_address: string }> = parsedTargets;
 
   let updatedCount = 0;
 
@@ -247,140 +301,168 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 4) Re-load enriched rows (incl. GoPlus caches) for response
-  // Join caches manually (cheap, exact match only).
-  const secMap = new Map<string, { always_deny: boolean; deny_reasons: string[] }>();
-  const urlMap = new Map<string, { is_phishing: boolean | null; dapp_risk_level: string | null }>();
-  const rugMap = new Map<string, { is_rugpull_risk: boolean | null; risk_level: string | null }>();
+  // 4) GoPlus realtime merge (cache-first, then live batch fetch)
+  const mappingsRes = await supabase.from("chain_mappings").select("*");
+  const mappings = new Map<string, { goplus_mode: string; goplus_chain_id: string | null }>();
+  if (!mappingsRes.error) for (const r of mappingsRes.data ?? []) mappings.set((r as any).dexscreener_chain_id, r as any);
 
-  // Load latest token snapshots (need website_url for URL cache lookup).
-  const latestTokens = await supabase
-    .from("tokens")
-    .select("token_id,chain_id,token_address,symbol,logo_url,website_url,price_usd,price_change_5m,price_change_1h,updated_at")
-    .in("token_id", tokenIds);
-  if (latestTokens.error) return json({ error: latestTokens.error.message }, { status: 500 });
-  const latest = (latestTokens.data ?? []) as any[];
-  const latestMap = new Map(latest.map((r) => [r.token_id, r]));
+  const apiKey = Deno.env.get("GOPLUS_API_KEY") ?? null;
+  const goByToken = new Map<string, any>();
 
-  // Exact-match cache fetch (per chain) to avoid huge scans.
-  const chains = Array.from(new Set(latest.map((r) => r.chain_id).filter(Boolean)));
-  for (const chainId of chains) {
-    const addrs = latest
-      .filter((r) => r.chain_id === chainId && typeof r.token_address === "string")
-      .map((r) => r.token_address);
-    const uniq = Array.from(new Set(addrs.map((s: string) => s.toLowerCase())));
-    if (uniq.length === 0) continue;
-
-    const sec = await supabase
-      .from("goplus_token_security_cache")
-      .select("chain_id,token_address,always_deny,deny_reasons")
-      .eq("chain_id", chainId)
-      .in("token_address", uniq);
-    if (!sec.error) {
-      for (const r of sec.data ?? []) {
-        secMap.set(`${(r as any).chain_id}:${(r as any).token_address}`.toLowerCase(), {
-          always_deny: (r as any).always_deny ?? false,
-          deny_reasons: (r as any).deny_reasons ?? [],
-        });
-      }
-    }
-
-    const rug = await supabase
-      .from("goplus_rugpull_cache")
-      .select("chain_id,token_address,is_rugpull_risk,risk_level")
-      .eq("chain_id", chainId)
-      .in("token_address", uniq);
-    if (!rug.error) {
-      for (const r of rug.data ?? []) {
-        rugMap.set(`${(r as any).chain_id}:${(r as any).token_address}`.toLowerCase(), {
-          is_rugpull_risk: (r as any).is_rugpull_risk ?? null,
-          risk_level: (r as any).risk_level ?? null,
-        });
-      }
-    }
+  // Group wishlist targets by chain
+  const byChainTargets = new Map<string, Array<{ token_id: string; token_address: string }>>();
+  for (const t of parsedTargets) {
+    const arr = byChainTargets.get(t.chain_id) ?? [];
+    arr.push({ token_id: t.token_id, token_address: t.token_address });
+    byChainTargets.set(t.chain_id, arr);
   }
 
-  // URL cache: exact-match by url list
-  const urls = Array.from(
-    new Set(
-      latest
-        .map((r) => (typeof r.website_url === "string" ? r.website_url.trim() : ""))
-        .filter((s) => s.length > 0),
-    ),
-  );
-  if (urls.length) {
-    for (let i = 0; i < urls.length; i += 100) {
-      const chunk = urls.slice(i, i + 100);
-      const ur = await supabase
-        .from("goplus_url_risk_cache")
-        .select("url,is_phishing,dapp_risk_level")
-        .in("url", chunk);
-      if (!ur.error) {
-        for (const r of ur.data ?? []) {
-          urlMap.set((r as any).url, {
-            is_phishing: (r as any).is_phishing ?? null,
-            dapp_risk_level: (r as any).dapp_risk_level ?? null,
+  await Promise.all(
+    Array.from(byChainTargets.entries()).map(async ([chainId, arr]) => {
+      const m = mappings.get(chainId);
+      if (!m) {
+        for (const x of arr) goByToken.set(`${chainId}:${x.token_address}`.toLowerCase(), { status: "unsupported" });
+        return;
+      }
+
+      const addrs = arr.map((x) => x.token_address);
+      const cached = await supabase
+        .from("goplus_token_security_cache")
+        .select("token_address,scanned_at,is_honeypot,cannot_sell,buy_tax,sell_tax,trust_list,is_blacklisted")
+        .eq("chain_id", chainId)
+        .in("token_address", addrs);
+
+      const freshMs = 6 * 60 * 60 * 1000;
+      const need: string[] = [];
+      if (!cached.error) {
+        for (const row of cached.data ?? []) {
+          const addr = String((row as any).token_address);
+          const scannedAt = (row as any).scanned_at ? new Date((row as any).scanned_at).getTime() : 0;
+          const fresh = scannedAt && Date.now() - scannedAt < freshMs;
+          goByToken.set(`${chainId}:${addr}`.toLowerCase(), { status: fresh ? "cached" : "stale", ...row });
+          if (!fresh) need.push(addr);
+        }
+      } else {
+        need.push(...addrs);
+      }
+
+      for (const addr of addrs) {
+        const k = `${chainId}:${addr}`.toLowerCase();
+        if (!goByToken.has(k)) need.push(addr);
+      }
+
+      const uniqNeed = Array.from(new Set(need.map((a) => a.toLowerCase())));
+      if (uniqNeed.length === 0) return;
+
+      const baseUrl =
+        m.goplus_mode === "solana"
+          ? "https://api.gopluslabs.io/api/v1/solana/token_security"
+          : `https://api.gopluslabs.io/api/v1/token_security/${encodeURIComponent(m.goplus_chain_id ?? "")}`;
+
+      for (let i = 0; i < uniqNeed.length; i += 20) {
+        const chunk = uniqNeed.slice(i, i + 20);
+        const url = `${baseUrl}?contract_addresses=${encodeURIComponent(chunk.join(","))}`;
+        const payload = await fetchGoPlusJson(url, apiKey, 1200).catch(() => null);
+        const nowIso = new Date().toISOString();
+        const upRows: any[] = [];
+
+        for (const a of chunk) {
+          const resObj = payload ? extractGoPlusResult(payload, a) ?? {} : null;
+          if (!resObj) {
+            goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "scanning" });
+            continue;
+          }
+
+          const cannot_sell = flag((resObj as any)["cannot_sell"] ?? (resObj as any)["cannotSell"]);
+          const is_honeypot = flag((resObj as any)["is_honeypot"] ?? (resObj as any)["isHoneypot"]);
+          const buy_tax = num((resObj as any)["buy_tax"] ?? (resObj as any)["buyTax"]);
+          const sell_tax = num((resObj as any)["sell_tax"] ?? (resObj as any)["sellTax"]);
+          const trust_list = flag(
+            (resObj as any)["trust_list"] ??
+              (resObj as any)["trustList"] ??
+              (resObj as any)["is_in_trust_list"] ??
+              (resObj as any)["isInTrustList"],
+          );
+          const is_blacklisted = flag(
+            (resObj as any)["is_blacklisted"] ?? (resObj as any)["isBlacklisted"] ?? (resObj as any)["blacklisted"],
+          );
+
+          goByToken.set(`${chainId}:${a}`.toLowerCase(), {
+            status: "live",
+            scanned_at: nowIso,
+            cannot_sell,
+            is_honeypot,
+            buy_tax,
+            sell_tax,
+            trust_list,
+            is_blacklisted,
+          });
+
+          upRows.push({
+            chain_id: chainId,
+            token_address: a,
+            raw: payload,
+            scanned_at: nowIso,
+            cannot_sell,
+            is_honeypot,
+            buy_tax,
+            sell_tax,
+            trust_list,
+            is_blacklisted,
           });
         }
+
+        if (upRows.length) await supabase.from("goplus_token_security_cache").upsert(upRows, { onConflict: "chain_id,token_address" });
       }
-    }
-  }
+    }),
+  );
+
+  // Load latest token snapshots for response (after Dex refresh)
+  const latestTokens = await supabase
+    .from("tokens")
+    .select("token_id,chain_id,token_address,symbol,logo_url,price_usd,price_change_5m,price_change_1h,updated_at")
+    .in("token_id", tokenIds);
+  if (latestTokens.error) return json({ error: latestTokens.error.message }, { status: 500 });
+  const latestMap = new Map((latestTokens.data ?? []).map((r: any) => [r.token_id, r]));
 
   const out = items.map((w) => {
+    const p = parseTokenId(w.token_id);
+    const chainId = p?.chain_id ?? "";
+    const tokenAddr = p?.token_address ?? "";
     const t = latestMap.get(w.token_id);
-    const chainId = t?.chain_id ?? (w.token_id.split(":")[0] ?? "");
-    const tokenAddr = t?.token_address ?? (w.token_id.split(":")[1] ?? "");
-    const sec = secMap.get(`${chainId}:${tokenAddr}`.toLowerCase());
-    const rug = rugMap.get(`${chainId}:${tokenAddr}`.toLowerCase());
-    const websiteUrl = typeof t?.website_url === "string" ? t.website_url : null;
-    const urlRisk = websiteUrl ? urlMap.get(websiteUrl) : undefined;
+    const go = goByToken.get(`${chainId}:${tokenAddr}`.toLowerCase()) ?? { status: "scanning" };
+    const status = go.status ?? "scanning";
 
-    const merged: TokenRow = {
-      token_id: w.token_id,
-      chain_id: chainId,
-      token_address: tokenAddr,
-      symbol: t?.symbol ?? null,
-      logo_url: t?.logo_url ?? null,
-      website_url: websiteUrl,
-      price_usd: t?.price_usd ?? null,
-      price_change_5m: t?.price_change_5m ?? null,
-      price_change_1h: t?.price_change_1h ?? null,
-      updated_at: t?.updated_at ?? new Date(0).toISOString(),
-      security_always_deny: sec?.always_deny ?? false,
-      security_deny_reasons: sec?.deny_reasons ?? [],
-      url_is_phishing: urlRisk?.is_phishing ?? null,
-      url_dapp_risk_level: urlRisk?.dapp_risk_level ?? null,
-      rug_is_rugpull_risk: rug?.is_rugpull_risk ?? null,
-      rug_risk_level: rug?.risk_level ?? null,
-    };
-
-    const roi = roiSinceCaptured(merged.price_usd, w.captured_price);
+    const currentPrice = t?.price_usd ?? null;
     return {
       token_id: w.token_id,
-      chain_id: merged.chain_id,
-      token_address: merged.token_address,
-      symbol: merged.symbol,
-      logo_url: merged.logo_url,
+      chain_id: chainId || (t?.chain_id ?? null),
+      token_address: tokenAddr || (t?.token_address ?? null),
+      symbol: t?.symbol ?? null,
+      logo_url: t?.logo_url ?? null,
       captured_price: w.captured_price,
       captured_at: w.captured_at,
-      current_price: merged.price_usd,
-      roi_since_captured: roi,
-      price_change_5m: merged.price_change_5m,
-      price_change_1h: merged.price_change_1h,
-      is_surging: isSurging(merged),
-      is_security_risk:
-        (merged.security_always_deny ?? false) ||
-        (merged.url_is_phishing ?? false) ||
-        (merged.rug_is_rugpull_risk ?? false),
-      safety_score: safetyScore(merged),
-      updated_at: merged.updated_at,
+      current_price: currentPrice,
+      roi_since_captured: roiSinceCaptured(currentPrice, w.captured_price),
+      price_change_5m: t?.price_change_5m ?? null,
+      price_change_1h: t?.price_change_1h ?? null,
+      is_surging: t?.price_change_5m !== null && t?.price_change_1h !== null ? t.price_change_5m > t.price_change_1h : false,
+      goplus_status: status,
+      goplus_is_honeypot: (go as any).is_honeypot ?? null,
+      goplus_buy_tax: num((go as any).buy_tax),
+      goplus_sell_tax: num((go as any).sell_tax),
+      goplus_trust_list: (go as any).trust_list ?? null,
+      goplus_is_blacklisted: (go as any).is_blacklisted ?? null,
+      safety_score: safetyScoreFromGoPlus({
+        is_honeypot: (go as any).is_honeypot ?? null,
+        cannot_sell: (go as any).cannot_sell ?? null,
+        is_blacklisted: (go as any).is_blacklisted ?? null,
+        sell_tax: num((go as any).sell_tax),
+      }),
+      updated_at: t?.updated_at ?? new Date(0).toISOString(),
     };
   });
 
-  return json({
-    items: out,
-    limit,
-    refreshed: { requested: staleTargets.length, updated: updatedCount },
-  });
+  return json({ items: out, limit, refreshed: { requested: staleTargets.length, updated: updatedCount } });
 });
 

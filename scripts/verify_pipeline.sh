@@ -97,9 +97,28 @@ echo
 echo
 
 echo "6) Smoke: call get-feed format=min (requires x-client-id)"
-curl -sS -i -H "x-client-id: verify-rc" \
-  "${SUPABASE_URL}/functions/v1/get-feed?limit=2&chains=solana,base&format=min" \
-  | sed -n '1,12p' | sed 's/.*/  &/'
+tmpdir="$(mktemp -d)"
+hdr="${tmpdir}/headers.txt"
+body="${tmpdir}/body.json"
+curl -sS -D "${hdr}" -o "${body}" -H "x-client-id: verify-rc" \
+  "${SUPABASE_URL}/functions/v1/get-feed?limit=2&chains=solana,base&format=min"
+echo "  x-next-cursor: $(awk 'BEGIN{IGNORECASE=1} /^x-next-cursor:/{print $2; exit}' "${hdr}" | tr -d '\r')"
+python3 - "${body}" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+assert isinstance(data, list), "format=min must return JSON array"
+if data:
+    x = data[0]
+    for k in ["id", "chain_id", "token_address", "goplus_status", "safety_score", "is_surging"]:
+        assert k in x, f"missing key: {k}"
+    # Numeric fields must be numbers (or null)
+    for k in ["price_usd", "liquidity_usd", "volume_24h", "fdv", "price_change_5m", "price_change_1h"]:
+        v = x.get(k, None)
+        assert (v is None) or isinstance(v, (int, float)), f"{k} must be number/null (got {type(v)})"
+print("  ok: get-feed(min) schema + numeric types")
+PY
+rm -rf "${tmpdir}"
 echo
 
 echo "7) Smoke: wishlist capture + ROI (get-wishlist)"

@@ -85,10 +85,12 @@ function computePolicy(fields: {
   cannot_sell: boolean | null;
   is_honeypot: boolean | null;
   sell_tax: number | null;
+  is_blacklisted: boolean | null;
 }): { always_deny: boolean; deny_reasons: string[] } {
   const reasons: string[] = [];
   if (fields.cannot_sell === true) reasons.push("cannot_sell");
   if (fields.is_honeypot === true) reasons.push("is_honeypot");
+  if (fields.is_blacklisted === true) reasons.push("is_blacklisted");
   // Conservative threshold: if sell tax > 50%, deny (tunable later)
   if (typeof fields.sell_tax === "number" && fields.sell_tax > 0.5) reasons.push("sell_tax_gt_50pct");
   return { always_deny: reasons.length > 0, deny_reasons: reasons };
@@ -236,8 +238,19 @@ Deno.serve(async (req) => {
         const contract_upgradeable = flag(result["contract_upgradeable"] ?? result["contractUpgradeable"]);
         const buy_tax = num(result["buy_tax"] ?? result["buyTax"]);
         const sell_tax = num(result["sell_tax"] ?? result["sellTax"]);
+        const trust_list = flag(
+          result["trust_list"] ??
+            result["trustList"] ??
+            result["is_in_trust_list"] ??
+            result["isInTrustList"] ??
+            result["in_trust_list"] ??
+            result["inTrustList"],
+        );
+        const is_blacklisted = flag(
+          result["is_blacklisted"] ?? result["isBlacklisted"] ?? result["blacklisted"] ?? result["is_in_blacklist"],
+        );
 
-        const policy = computePolicy({ cannot_sell, is_honeypot, sell_tax });
+        const policy = computePolicy({ cannot_sell, is_honeypot, sell_tax, is_blacklisted });
 
         const up = await supabase
           .from("goplus_token_security_cache")
@@ -253,6 +266,8 @@ Deno.serve(async (req) => {
               contract_upgradeable,
               buy_tax,
               sell_tax,
+              trust_list,
+              is_blacklisted,
               always_deny: policy.always_deny,
               deny_reasons: policy.deny_reasons,
             },

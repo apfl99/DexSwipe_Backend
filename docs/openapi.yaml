@@ -41,8 +41,8 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 100
-            default: 30
+            maximum: 20
+            default: 20
         - in: query
           name: cursor
           description: Keyset cursor (ISO timestamp). Returns items with `updated_at < cursor`.
@@ -69,6 +69,13 @@ paths:
         - in: query
           name: include_risky
           description: If true, include tokens flagged as phishing/rugpull risk (default false).
+          schema:
+            type: boolean
+        - in: query
+          name: include_scanning
+          description: |
+            If true, include tokens whose GoPlus status is `scanning`/`unsupported`.
+            Default: true (recommended for fresh DB / cold start).
           schema:
             type: boolean
       responses:
@@ -171,7 +178,7 @@ paths:
                   token_id: { type: string }
   /functions/v1/get-wishlist:
     get:
-      summary: Get wishlist ROI (lazy refresh)
+      summary: Get wishlist (live price sync + GoPlus merge)
       parameters:
         - in: header
           name: x-client-id
@@ -249,56 +256,37 @@ components:
         price_change_5m: { type: number, nullable: true }
         price_change_15m: { type: number, nullable: true }
         price_change_1h: { type: number, nullable: true }
-        is_surging: { type: boolean, nullable: true }
+        is_surging: { type: boolean }
+        is_security_risk: { type: boolean }
         safety_score:
           type: integer
           minimum: 0
           maximum: 100
-          nullable: true
-        buys_24h: { type: integer, nullable: true }
-        sells_24h: { type: integer, nullable: true }
-        pair_created_at: { type: string, nullable: true, format: date-time }
         updated_at: { type: string, format: date-time }
-        security:
-          nullable: true
-          type: object
-          properties:
-            always_deny: { type: boolean }
-            deny_reasons:
-              type: array
-              items: { type: string }
-            scanned_at:
-              type: string
-              format: date-time
-              nullable: true
-        quality:
-          nullable: true
-          type: object
-          properties:
-            url_risk:
-              nullable: true
-              type: object
-              properties:
-                is_phishing: { type: boolean, nullable: true }
-                dapp_risk_level: { type: string, nullable: true }
-                scanned_at: { type: string, format: date-time, nullable: true }
-            rugpull:
-              nullable: true
-              type: object
-              properties:
-                is_rugpull_risk: { type: boolean, nullable: true }
-                risk_level: { type: string, nullable: true }
-                scanned_at: { type: string, format: date-time, nullable: true }
+        goplus_status:
+          type: string
+          description: "GoPlus merge status: live|cached|stale|scanning|unsupported"
+        goplus_scanned_at: { type: string, format: date-time, nullable: true }
+        goplus_cannot_sell: { type: boolean, nullable: true }
+        goplus_is_honeypot: { type: boolean, nullable: true }
+        goplus_buy_tax: { type: number, nullable: true }
+        goplus_sell_tax: { type: number, nullable: true }
+        goplus_trust_list: { type: boolean, nullable: true }
+        goplus_is_blacklisted: { type: boolean, nullable: true }
     FeedItemMin:
       type: object
-      required: [id, chain_id, is_security_risk, safety_score, is_surging]
+      required: [id, chain_id, token_address, is_security_risk, safety_score, is_surging, goplus_status]
       properties:
         id: { type: string }
         chain_id: { type: string }
+        token_address: { type: string }
         logo_url: { type: string, nullable: true }
         symbol: { type: string, nullable: true }
+        price_usd: { type: number, nullable: true }
+        liquidity_usd: { type: number, nullable: true }
+        volume_24h: { type: number, nullable: true }
+        fdv: { type: number, nullable: true }
         price_change_5m: { type: number, nullable: true }
-        price_change_15m: { type: number, nullable: true }
         price_change_1h: { type: number, nullable: true }
         is_security_risk: { type: boolean }
         safety_score:
@@ -306,10 +294,18 @@ components:
           minimum: 0
           maximum: 100
         is_surging: { type: boolean }
+        goplus_status:
+          type: string
+          description: "GoPlus merge status: live|cached|stale|scanning|unsupported"
+        goplus_is_honeypot: { type: boolean, nullable: true }
+        goplus_buy_tax: { type: number, nullable: true }
+        goplus_sell_tax: { type: number, nullable: true }
+        goplus_trust_list: { type: boolean, nullable: true }
+        goplus_is_blacklisted: { type: boolean, nullable: true }
 
     WishlistItem:
       type: object
-      required: [token_id, chain_id, token_address, captured_price, current_price, roi_since_captured, safety_score, is_surging, updated_at]
+      required: [token_id, chain_id, token_address, captured_price, current_price, roi_since_captured, safety_score, is_surging, updated_at, goplus_status]
       properties:
         token_id: { type: string }
         chain_id: { type: string }
@@ -323,10 +319,17 @@ components:
         price_change_5m: { type: number, nullable: true }
         price_change_1h: { type: number, nullable: true }
         is_surging: { type: boolean }
-        is_security_risk: { type: boolean }
         safety_score:
           type: integer
           minimum: 0
           maximum: 100
         updated_at: { type: string, format: date-time }
+        goplus_status:
+          type: string
+          description: "GoPlus merge status: live|cached|stale|scanning|unsupported"
+        goplus_is_honeypot: { type: boolean, nullable: true }
+        goplus_buy_tax: { type: number, nullable: true }
+        goplus_sell_tax: { type: number, nullable: true }
+        goplus_trust_list: { type: boolean, nullable: true }
+        goplus_is_blacklisted: { type: boolean, nullable: true }
 

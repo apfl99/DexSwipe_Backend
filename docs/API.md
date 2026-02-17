@@ -15,13 +15,15 @@
 
 - **Query**
   - `format`: `full|min` (기본 `full`)
-  - `limit`: 1~100 (기본 30)
+  - `limit`: 1~20 (기본 20, 실시간 병합 비용 제한)
   - `cursor`: ISO timestamp (선택). `updated_at < cursor` 범위를 가져옵니다.
   - `chains`: `solana,base` 형태
   - `min_liquidity_usd`: 최소 유동성(USD)
   - `min_volume_24h`: 24h 거래량 최소값(USD)
   - `min_fdv`: FDV 최소값(USD)
   - `include_risky`: `true`면 피싱/러그 위험 자산도 포함(기본 false)
+  - `include_scanning`: `true|false` (기본 `true`)  
+    - GoPlus 보안 데이터가 아직 없거나 호출 실패 시 `goplus_status=scanning|unsupported`로 내려옵니다.
 
 - **리스크 필터(기본 동작)**
   - `security.always_deny=true` 이면 제외
@@ -44,7 +46,10 @@ curl -sS -H "x-client-id: device-abc" \
 ```
 
 `format=min`일 때는 응답이 **flat JSON array**이고, 다음 페이지 커서는 응답 헤더 `x-next-cursor`로 내려옵니다.
-또한 `safety_score(0~100)` 및 `is_surging(true/false)`가 포함됩니다.
+응답은 DexScreener(가격) + GoPlus(보안)를 병렬로 합친 “완전체”를 목표로 하며, 주요 필드:
+- DexScreener: `price_usd`, `volume_24h`, `liquidity_usd`, `fdv`, `price_change_5m`, `price_change_1h`
+- GoPlus: `goplus_is_honeypot`, `goplus_buy_tax`, `goplus_sell_tax`, `goplus_trust_list`, `goplus_is_blacklisted`, `goplus_status`
+- Intelligence: `safety_score(0~100)`, `is_surging`
 
 위험 자산도 포함해서 확인(운영/디버그용):
 
@@ -72,9 +77,10 @@ curl -sS -H "x-client-id: device-abc" \
 위시리스트 ROI 조회(= “헌터 트래킹 엔진”).
 
 - **특징**
-  - **Lazy Refresh**: 위시리스트에 있는 토큰 중 `tokens.updated_at`이 5분 이상 지난 항목만 선택적으로 DexScreener에서 가격을 갱신합니다.
-  - `roi_since_captured = ((current_price - captured_price) / captured_price) * 100`
-  - `is_surging = (price_change_5m > price_change_1h)`
+  - **Live-Sync**: 호출 시마다 위시리스트 토큰 전체를 DexScreener에서 최신 가격으로 갱신합니다.
+  - `captured_price`(저장 시점) + `current_price`(현재 시점)를 함께 반환합니다.
+  - `roi_since_captured`도 함께 내려주지만, 프론트에서 즉시 재계산해도 됩니다.
+  - GoPlus 보안 필드도 병합하여 반환합니다(`goplus_*`).
 
 - **Headers**
   - `x-client-id`: 필수
