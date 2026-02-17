@@ -86,13 +86,17 @@ function computePolicy(fields: {
   is_honeypot: boolean | null;
   sell_tax: number | null;
   is_blacklisted: boolean | null;
+  cannot_sell_all: boolean | null;
+  buy_tax: number | null;
 }): { always_deny: boolean; deny_reasons: string[] } {
   const reasons: string[] = [];
   if (fields.cannot_sell === true) reasons.push("cannot_sell");
+  if (fields.cannot_sell_all === true) reasons.push("cannot_sell_all");
   if (fields.is_honeypot === true) reasons.push("is_honeypot");
   if (fields.is_blacklisted === true) reasons.push("is_blacklisted");
   // Conservative threshold: if sell tax > 50%, deny (tunable later)
   if (typeof fields.sell_tax === "number" && fields.sell_tax > 0.5) reasons.push("sell_tax_gt_50pct");
+  if (typeof fields.buy_tax === "number" && fields.buy_tax > 0.5) reasons.push("buy_tax_gt_50pct");
   return { always_deny: reasons.length > 0, deny_reasons: reasons };
 }
 
@@ -238,6 +242,9 @@ Deno.serve(async (req) => {
         const contract_upgradeable = flag(result["contract_upgradeable"] ?? result["contractUpgradeable"]);
         const buy_tax = num(result["buy_tax"] ?? result["buyTax"]);
         const sell_tax = num(result["sell_tax"] ?? result["sellTax"]);
+        const cannot_sell_all = flag(
+          result["cannot_sell_all"] ?? result["cannotSellAll"] ?? result["cannot_sell"] ?? result["cannotSell"],
+        );
         const trust_list = flag(
           result["trust_list"] ??
             result["trustList"] ??
@@ -250,7 +257,27 @@ Deno.serve(async (req) => {
           result["is_blacklisted"] ?? result["isBlacklisted"] ?? result["blacklisted"] ?? result["is_in_blacklist"],
         );
 
-        const policy = computePolicy({ cannot_sell, is_honeypot, sell_tax, is_blacklisted });
+        const transfer_pausable = flag(
+          result["transfer_pausable"] ?? result["transferPausable"] ?? result["can_pause_transfer"] ??
+            result["canPauseTransfer"],
+        );
+        const slippage_modifiable = flag(
+          result["slippage_modifiable"] ?? result["slippageModifiable"] ?? result["is_slippage_modifiable"],
+        );
+        const external_call = flag(result["external_call"] ?? result["externalCall"]);
+        const owner_change_balance = flag(
+          result["owner_change_balance"] ?? result["ownerChangeBalance"] ?? result["owner_change_balance_ability"],
+        );
+        const hidden_owner = flag(result["hidden_owner"] ?? result["hiddenOwner"]);
+        const cannot_buy = flag(result["cannot_buy"] ?? result["cannotBuy"]);
+        const trading_cooldown = flag(result["trading_cooldown"] ?? result["tradingCooldown"]);
+        const is_open_source = flag(result["is_open_source"] ?? result["isOpenSource"]);
+        const is_mintable = flag(result["is_mintable"] ?? result["isMintable"] ?? result["mintable"]);
+        const take_back_ownership = flag(
+          result["take_back_ownership"] ?? result["takeBackOwnership"] ?? result["can_take_back_ownership"],
+        );
+
+        const policy = computePolicy({ cannot_sell, is_honeypot, sell_tax, is_blacklisted, cannot_sell_all, buy_tax });
 
         const up = await supabase
           .from("goplus_token_security_cache")
@@ -268,6 +295,17 @@ Deno.serve(async (req) => {
               sell_tax,
               trust_list,
               is_blacklisted,
+              cannot_sell_all,
+              transfer_pausable,
+              slippage_modifiable,
+              external_call,
+              owner_change_balance,
+              hidden_owner,
+              cannot_buy,
+              trading_cooldown,
+              is_open_source,
+              is_mintable,
+              take_back_ownership,
               always_deny: policy.always_deny,
               deny_reasons: policy.deny_reasons,
             },

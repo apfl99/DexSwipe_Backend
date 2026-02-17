@@ -120,6 +120,7 @@ function isSurging(r: FeedRow): boolean {
 type DexPair = Record<string, unknown> & {
   chainId?: string;
   baseToken?: { address?: string; symbol?: string; name?: string };
+  url?: string;
   priceUsd?: string;
   liquidity?: { usd?: number };
   volume?: Record<string, number>;
@@ -127,7 +128,7 @@ type DexPair = Record<string, unknown> & {
   marketCap?: number;
   priceChange?: Record<string, number>;
   pairCreatedAt?: number;
-  info?: { imageUrl?: string; websites?: Array<{ url?: string }> };
+  info?: { imageUrl?: string; websites?: Array<{ url?: string }>; socials?: Array<{ type?: string; url?: string }> };
 };
 
 function toNum(v: unknown): number | null {
@@ -169,6 +170,24 @@ function websiteUrl(pair: DexPair): string | null {
   const w = pair.info?.websites;
   const u0 = Array.isArray(w) && w.length ? w[0]?.url : undefined;
   return typeof u0 === "string" && u0.trim() ? u0.trim() : null;
+}
+
+function dexChartUrl(pair: DexPair): string | null {
+  const u = pair.url;
+  return typeof u === "string" && u.trim() ? u.trim() : null;
+}
+
+function socialUrl(pair: DexPair, kind: "twitter" | "telegram"): string | null {
+  const s = pair.info?.socials;
+  if (!Array.isArray(s) || !s.length) return null;
+  for (const it of s) {
+    const t = typeof it?.type === "string" ? it.type.toLowerCase() : "";
+    const u = typeof it?.url === "string" ? it.url.trim() : "";
+    if (!u) continue;
+    if (kind === "twitter" && (t === "twitter" || t === "x")) return u;
+    if (kind === "telegram" && t === "telegram") return u;
+  }
+  return null;
 }
 
 function bestPairsByToken(pairs: DexPair[], chainId: string): Map<string, DexPair> {
@@ -240,6 +259,137 @@ function safetyScoreFromHybrid(x: {
     else if (x.sell_tax >= 0.1) score -= 20;
   }
   return clampScore(score);
+}
+
+type GoPlusSignals = {
+  // status
+  status: "live" | "cached" | "stale" | "scanning" | "unsupported";
+  // critical
+  is_honeypot: boolean | null;
+  is_blacklisted: boolean | null;
+  cannot_sell_all: boolean | null;
+  buy_tax: number | null;
+  sell_tax: number | null;
+  // high (-20)
+  is_proxy: boolean | null;
+  transfer_pausable: boolean | null;
+  slippage_modifiable: boolean | null;
+  external_call: boolean | null;
+  // medium (-10)
+  owner_change_balance: boolean | null;
+  hidden_owner: boolean | null;
+  cannot_buy: boolean | null;
+  trading_cooldown: boolean | null;
+  // low (-5)
+  is_open_source: boolean | null;
+  is_mintable: boolean | null;
+  take_back_ownership: boolean | null;
+};
+
+function pct(n: number): string {
+  return `${Math.round(n * 1000) / 10}%`;
+}
+
+function hasAnySignal(s: GoPlusSignals): boolean {
+  const vals: Array<unknown> = [
+    s.is_honeypot,
+    s.is_blacklisted,
+    s.cannot_sell_all,
+    s.buy_tax,
+    s.sell_tax,
+    s.is_proxy,
+    s.transfer_pausable,
+    s.slippage_modifiable,
+    s.external_call,
+    s.owner_change_balance,
+    s.hidden_owner,
+    s.cannot_buy,
+    s.trading_cooldown,
+    s.is_open_source,
+    s.is_mintable,
+    s.take_back_ownership,
+  ];
+  return vals.some((v) => v !== null && v !== undefined);
+}
+
+function scoreDeductionModel(s: GoPlusSignals): {
+  safety_score: number | null;
+  is_security_risk: boolean;
+  risk_factors: string[];
+} {
+  // Unknown state MUST NOT be 100.
+  if (s.status !== "live" && s.status !== "cached" && s.status !== "stale") {
+    return { safety_score: 50, is_security_risk: true, risk_factors: ["Unknown Risk (GoPlus unavailable)"] };
+  }
+  if (!hasAnySignal(s)) {
+    return { safety_score: 50, is_security_risk: true, risk_factors: ["Unknown Risk (GoPlus missing fields)"] };
+  }
+
+  const factors: string[] = [];
+
+  // Critical => 0
+  if (s.is_honeypot === true) factors.push("Honeypot");
+  if (s.is_blacklisted === true) factors.push("Blacklisted");
+  if (s.cannot_sell_all === true) factors.push("Cannot Sell All");
+  if (typeof s.sell_tax === "number" && s.sell_tax > 0.5) factors.push(`High Sell Tax (${pct(s.sell_tax)})`);
+  if (typeof s.buy_tax === "number" && s.buy_tax > 0.5) factors.push(`High Buy Tax (${pct(s.buy_tax)})`);
+  if (factors.length) return { safety_score: 0, is_security_risk: true, risk_factors: factors };
+
+  let score = 100;
+
+  // High risks (-20 each)
+  if (s.is_proxy === true) {
+    score -= 20;
+    factors.push("Proxy Contract");
+  }
+  if (s.transfer_pausable === true) {
+    score -= 20;
+    factors.push("Transfer Pausable");
+  }
+  if (s.slippage_modifiable === true) {
+    score -= 20;
+    factors.push("Slippage Modifiable");
+  }
+  if (s.external_call === true) {
+    score -= 20;
+    factors.push("External Call");
+  }
+
+  // Medium risks (-10 each)
+  if (s.owner_change_balance === true) {
+    score -= 10;
+    factors.push("Owner Can Change Balance");
+  }
+  if (s.hidden_owner === true) {
+    score -= 10;
+    factors.push("Hidden Owner");
+  }
+  if (s.cannot_buy === true) {
+    score -= 10;
+    factors.push("Cannot Buy");
+  }
+  if (s.trading_cooldown === true) {
+    score -= 10;
+    factors.push("Trading Cooldown");
+  }
+
+  // Low risks (-5 each)
+  if (s.is_open_source === false) {
+    score -= 5;
+    factors.push("Not Open Source");
+  }
+  if (s.is_mintable === true) {
+    score -= 5;
+    factors.push("Mintable");
+  }
+  if (s.take_back_ownership === true) {
+    score -= 5;
+    factors.push("Take Back Ownership");
+  }
+
+  const finalScore = clampScore(score);
+  const isRisk = finalScore < 60 || factors.length > 0;
+  return { safety_score: finalScore, is_security_risk: isRisk, risk_factors: factors };
 }
 
 Deno.serve(async (req) => {
@@ -325,7 +475,10 @@ Deno.serve(async (req) => {
             symbol: (best.baseToken as any)?.symbol ?? null,
             name: (best.baseToken as any)?.name ?? null,
             logo_url: webp((best.info as any)?.imageUrl ?? null),
-            website_url: websiteUrl(best),
+            official_website_url: websiteUrl(best),
+            dex_chart_url: dexChartUrl(best),
+            twitter_url: socialUrl(best, "twitter"),
+            telegram_url: socialUrl(best, "telegram"),
           });
         }
 
@@ -342,7 +495,12 @@ Deno.serve(async (req) => {
               name: d.name,
               symbol: d.symbol,
               logo_url: d.logo_url,
-              website_url: d.website_url,
+              // Backward compatibility: website_url == official website
+              website_url: d.official_website_url,
+              official_website_url: d.official_website_url,
+              dex_chart_url: d.dex_chart_url,
+              twitter_url: d.twitter_url,
+              telegram_url: d.telegram_url,
               price_usd: d.price_usd,
               liquidity_usd: d.liquidity_usd,
               volume_24h: d.volume_24h,
@@ -380,7 +538,9 @@ Deno.serve(async (req) => {
       const addrs = items.map((x) => x.token_address);
       const cached = await supabase
         .from("goplus_token_security_cache")
-        .select("token_address,scanned_at,is_honeypot,cannot_sell,buy_tax,sell_tax,trust_list,is_blacklisted")
+        .select(
+          "token_address,scanned_at,is_honeypot,is_blacklisted,cannot_sell,cannot_sell_all,buy_tax,sell_tax,trust_list,is_proxy,transfer_pausable,slippage_modifiable,external_call,owner_change_balance,hidden_owner,cannot_buy,trading_cooldown,is_open_source,is_mintable,take_back_ownership",
+        )
         .eq("chain_id", chainId)
         .in("token_address", addrs);
 
@@ -426,7 +586,14 @@ Deno.serve(async (req) => {
           }
 
           const cannot_sell = flag((resObj as any)["cannot_sell"] ?? (resObj as any)["cannotSell"]);
+          const cannot_sell_all = flag(
+            (resObj as any)["cannot_sell_all"] ??
+              (resObj as any)["cannotSellAll"] ??
+              (resObj as any)["cannot_sell"] ??
+              (resObj as any)["cannotSell"],
+          );
           const is_honeypot = flag((resObj as any)["is_honeypot"] ?? (resObj as any)["isHoneypot"]);
+          const is_proxy = flag((resObj as any)["is_proxy"] ?? (resObj as any)["isProxy"]);
           const buy_tax = toNum((resObj as any)["buy_tax"] ?? (resObj as any)["buyTax"]);
           const sell_tax = toNum((resObj as any)["sell_tax"] ?? (resObj as any)["sellTax"]);
           const trust_list = flag(
@@ -438,16 +605,53 @@ Deno.serve(async (req) => {
           const is_blacklisted = flag(
             (resObj as any)["is_blacklisted"] ?? (resObj as any)["isBlacklisted"] ?? (resObj as any)["blacklisted"],
           );
+          const transfer_pausable = flag(
+            (resObj as any)["transfer_pausable"] ??
+              (resObj as any)["transferPausable"] ??
+              (resObj as any)["can_pause_transfer"] ??
+              (resObj as any)["canPauseTransfer"],
+          );
+          const slippage_modifiable = flag(
+            (resObj as any)["slippage_modifiable"] ?? (resObj as any)["slippageModifiable"] ?? (resObj as any)["is_slippage_modifiable"],
+          );
+          const external_call = flag((resObj as any)["external_call"] ?? (resObj as any)["externalCall"]);
+          const owner_change_balance = flag(
+            (resObj as any)["owner_change_balance"] ??
+              (resObj as any)["ownerChangeBalance"] ??
+              (resObj as any)["owner_change_balance_ability"],
+          );
+          const hidden_owner = flag((resObj as any)["hidden_owner"] ?? (resObj as any)["hiddenOwner"]);
+          const cannot_buy = flag((resObj as any)["cannot_buy"] ?? (resObj as any)["cannotBuy"]);
+          const trading_cooldown = flag((resObj as any)["trading_cooldown"] ?? (resObj as any)["tradingCooldown"]);
+          const is_open_source = flag((resObj as any)["is_open_source"] ?? (resObj as any)["isOpenSource"]);
+          const is_mintable = flag((resObj as any)["is_mintable"] ?? (resObj as any)["isMintable"] ?? (resObj as any)["mintable"]);
+          const take_back_ownership = flag(
+            (resObj as any)["take_back_ownership"] ??
+              (resObj as any)["takeBackOwnership"] ??
+              (resObj as any)["can_take_back_ownership"],
+          );
 
           goByToken.set(`${chainId}:${a}`.toLowerCase(), {
             status: "live",
             scanned_at: nowIso,
             cannot_sell,
+            cannot_sell_all,
             is_honeypot,
+            is_proxy,
             buy_tax,
             sell_tax,
             trust_list,
             is_blacklisted,
+            transfer_pausable,
+            slippage_modifiable,
+            external_call,
+            owner_change_balance,
+            hidden_owner,
+            cannot_buy,
+            trading_cooldown,
+            is_open_source,
+            is_mintable,
+            take_back_ownership,
           });
 
           upRows.push({
@@ -456,11 +660,23 @@ Deno.serve(async (req) => {
             raw: payload,
             scanned_at: nowIso,
             cannot_sell,
+            cannot_sell_all,
             is_honeypot,
+            is_proxy,
             buy_tax,
             sell_tax,
             trust_list,
             is_blacklisted,
+            transfer_pausable,
+            slippage_modifiable,
+            external_call,
+            owner_change_balance,
+            hidden_owner,
+            cannot_buy,
+            trading_cooldown,
+            is_open_source,
+            is_mintable,
+            take_back_ownership,
           });
         }
 
@@ -491,23 +707,26 @@ Deno.serve(async (req) => {
         const price_change_5m = toNum(dex.price_change_5m) ?? toNum(r.price_change_5m);
         const price_change_1h = toNum(dex.price_change_1h) ?? toNum(r.price_change_1h);
 
-        const sec = {
+        const signals: GoPlusSignals = {
           status,
           is_honeypot: go.is_honeypot ?? null,
-          cannot_sell: go.cannot_sell ?? null,
+          is_blacklisted: go.is_blacklisted ?? null,
+          cannot_sell_all: go.cannot_sell_all ?? null,
           buy_tax: toNum(go.buy_tax),
           sell_tax: toNum(go.sell_tax),
-          trust_list: go.trust_list ?? null,
-          is_blacklisted: go.is_blacklisted ?? null,
+          is_proxy: go.is_proxy ?? null,
+          transfer_pausable: go.transfer_pausable ?? null,
+          slippage_modifiable: go.slippage_modifiable ?? null,
+          external_call: go.external_call ?? null,
+          owner_change_balance: go.owner_change_balance ?? null,
+          hidden_owner: go.hidden_owner ?? null,
+          cannot_buy: go.cannot_buy ?? null,
+          trading_cooldown: go.trading_cooldown ?? null,
+          is_open_source: go.is_open_source ?? null,
+          is_mintable: go.is_mintable ?? null,
+          take_back_ownership: go.take_back_ownership ?? null,
         };
-
-        const safety_score = safetyScoreFromHybrid({
-          is_honeypot: sec.is_honeypot,
-          cannot_sell: sec.cannot_sell,
-          is_blacklisted: sec.is_blacklisted,
-          sell_tax: sec.sell_tax,
-        });
-        const is_security_risk = safety_score < 60 || sec.is_honeypot === true || sec.cannot_sell === true || sec.is_blacklisted === true;
+        const scored = scoreDeductionModel(signals);
 
         return {
           id: r.token_id,
@@ -515,6 +734,10 @@ Deno.serve(async (req) => {
           token_address: r.token_address,
           symbol: dex.symbol ?? r.symbol,
           logo_url: dex.logo_url ?? r.logo_url,
+          official_website_url: dex.official_website_url ?? null,
+          dex_chart_url: dex.dex_chart_url ?? null,
+          twitter_url: dex.twitter_url ?? null,
+          telegram_url: dex.telegram_url ?? null,
           price_usd: toNum(dex.price_usd) ?? toNum(r.price_usd),
           liquidity_usd: toNum(dex.liquidity_usd) ?? toNum(r.liquidity_usd),
           volume_24h: toNum(dex.volume_24h) ?? toNum(r.volume_24h),
@@ -522,14 +745,15 @@ Deno.serve(async (req) => {
           price_change_5m,
           price_change_1h,
           is_surging: price_change_5m !== null && price_change_1h !== null ? price_change_5m > price_change_1h : false,
-          safety_score,
-          is_security_risk,
-          goplus_status: sec.status,
-          goplus_is_honeypot: sec.is_honeypot,
-          goplus_buy_tax: sec.buy_tax,
-          goplus_sell_tax: sec.sell_tax,
-          goplus_trust_list: sec.trust_list,
-          goplus_is_blacklisted: sec.is_blacklisted,
+          safety_score: scored.safety_score,
+          is_security_risk: scored.is_security_risk,
+          risk_factors: scored.risk_factors,
+          goplus_status: status,
+          goplus_is_honeypot: signals.is_honeypot,
+          goplus_buy_tax: signals.buy_tax,
+          goplus_sell_tax: signals.sell_tax,
+          goplus_trust_list: go.trust_list ?? null,
+          goplus_is_blacklisted: signals.is_blacklisted,
         };
       })
       .filter(Boolean);
@@ -550,24 +774,26 @@ Deno.serve(async (req) => {
       const price_change_15m = toNum(dex.price_change_15m) ?? toNum(r.price_change_15m);
       const price_change_1h = toNum(dex.price_change_1h) ?? toNum(r.price_change_1h);
 
-      const sec = {
+      const signals: GoPlusSignals = {
         status,
-        scanned_at: go.scanned_at ?? (go as any).scanned_at ?? null,
         is_honeypot: (go as any).is_honeypot ?? null,
-        cannot_sell: (go as any).cannot_sell ?? null,
+        is_blacklisted: (go as any).is_blacklisted ?? null,
+        cannot_sell_all: (go as any).cannot_sell_all ?? null,
         buy_tax: toNum((go as any).buy_tax),
         sell_tax: toNum((go as any).sell_tax),
-        trust_list: (go as any).trust_list ?? null,
-        is_blacklisted: (go as any).is_blacklisted ?? null,
+        is_proxy: (go as any).is_proxy ?? null,
+        transfer_pausable: (go as any).transfer_pausable ?? null,
+        slippage_modifiable: (go as any).slippage_modifiable ?? null,
+        external_call: (go as any).external_call ?? null,
+        owner_change_balance: (go as any).owner_change_balance ?? null,
+        hidden_owner: (go as any).hidden_owner ?? null,
+        cannot_buy: (go as any).cannot_buy ?? null,
+        trading_cooldown: (go as any).trading_cooldown ?? null,
+        is_open_source: (go as any).is_open_source ?? null,
+        is_mintable: (go as any).is_mintable ?? null,
+        take_back_ownership: (go as any).take_back_ownership ?? null,
       };
-
-      const safety_score = safetyScoreFromHybrid({
-        is_honeypot: sec.is_honeypot,
-        cannot_sell: sec.cannot_sell,
-        is_blacklisted: sec.is_blacklisted,
-        sell_tax: sec.sell_tax,
-      });
-      const is_security_risk = safety_score < 60 || sec.is_honeypot === true || sec.cannot_sell === true || sec.is_blacklisted === true;
+      const scored = scoreDeductionModel(signals);
 
       return {
         token_id: r.token_id,
@@ -576,7 +802,11 @@ Deno.serve(async (req) => {
         name: dex.name ?? r.name,
         symbol: dex.symbol ?? r.symbol,
         logo_url: dex.logo_url ?? r.logo_url,
-        website_url: dex.website_url ?? r.website_url,
+        website_url: dex.official_website_url ?? r.website_url,
+        official_website_url: dex.official_website_url ?? null,
+        dex_chart_url: dex.dex_chart_url ?? null,
+        twitter_url: dex.twitter_url ?? null,
+        telegram_url: dex.telegram_url ?? null,
         price_usd: toNum(dex.price_usd) ?? toNum(r.price_usd),
         liquidity_usd: toNum(dex.liquidity_usd) ?? toNum(r.liquidity_usd),
         volume_24h: toNum(dex.volume_24h) ?? toNum(r.volume_24h),
@@ -586,17 +816,35 @@ Deno.serve(async (req) => {
         price_change_15m,
         price_change_1h,
         is_surging: price_change_5m !== null && price_change_1h !== null ? price_change_5m > price_change_1h : false,
-        safety_score,
-        is_security_risk,
-        goplus_status: sec.status,
-        goplus_scanned_at: sec.scanned_at,
-        goplus_cannot_sell: sec.cannot_sell,
-        goplus_is_honeypot: sec.is_honeypot,
-        goplus_buy_tax: sec.buy_tax,
-        goplus_sell_tax: sec.sell_tax,
-        goplus_trust_list: sec.trust_list,
-        goplus_is_blacklisted: sec.is_blacklisted,
+        safety_score: scored.safety_score,
+        is_security_risk: scored.is_security_risk,
+        risk_factors: scored.risk_factors,
+        goplus_status: status,
+        goplus_scanned_at: (go as any).scanned_at ?? null,
+        goplus_is_honeypot: signals.is_honeypot,
+        goplus_is_blacklisted: signals.is_blacklisted,
+        goplus_cannot_sell_all: signals.cannot_sell_all,
+        goplus_buy_tax: signals.buy_tax,
+        goplus_sell_tax: signals.sell_tax,
+        goplus_is_proxy: signals.is_proxy,
+        goplus_transfer_pausable: signals.transfer_pausable,
+        goplus_slippage_modifiable: signals.slippage_modifiable,
+        goplus_external_call: signals.external_call,
+        goplus_owner_change_balance: signals.owner_change_balance,
+        goplus_hidden_owner: signals.hidden_owner,
+        goplus_cannot_buy: signals.cannot_buy,
+        goplus_trading_cooldown: signals.trading_cooldown,
+        goplus_is_open_source: signals.is_open_source,
+        goplus_is_mintable: signals.is_mintable,
+        goplus_take_back_ownership: signals.take_back_ownership,
+        goplus_trust_list: (go as any).trust_list ?? null,
         updated_at: r.updated_at,
+        urls: {
+          official_website: dex.official_website_url ?? null,
+          dex_chart: dex.dex_chart_url ?? null,
+          twitter: dex.twitter_url ?? null,
+          telegram: dex.telegram_url ?? null,
+        },
       };
     })
     .filter(Boolean);
@@ -610,7 +858,7 @@ Deno.serve(async (req) => {
       pagination: "cursor (keyset) using tokens.updated_at",
       anti_join: "LEFT JOIN seen_tokens + wishlist where null",
       hybrid: "DexScreener tokens/v1 + GoPlus token_security (parallel, cached)",
-      include_scanning_default: false,
+      include_scanning_default: true,
     },
   });
 });

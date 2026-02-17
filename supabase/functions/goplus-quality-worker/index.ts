@@ -114,15 +114,17 @@ Deno.serve(async (req) => {
       const chainId = job.chain_id;
       const tokenAddress = job.token_address;
       try {
-        // Lean mode: use denormalized tokens.website_url only (no raw profile/pair storage).
+        // Lean mode: use denormalized official website only (avoid scanning DexScreener chart urls).
         const tr = await supabase
           .from("tokens")
-          .select("website_url")
+          .select("official_website_url,website_url")
           .eq("chain_id", chainId)
           .eq("token_address", tokenAddress)
           .maybeSingle();
-        const websiteUrl = (tr.data as any)?.website_url;
-        const links = typeof websiteUrl === "string" && websiteUrl.trim() ? [websiteUrl.trim()] : [];
+        const official = (tr.data as any)?.official_website_url;
+        const legacy = (tr.data as any)?.website_url;
+        const websiteUrl = typeof official === "string" && official.trim() ? official.trim() : typeof legacy === "string" ? legacy.trim() : "";
+        const links = websiteUrl ? [websiteUrl] : [];
 
         // 1) URL checks (phishing_site + dapp_security) with cache
         for (const url of links) {

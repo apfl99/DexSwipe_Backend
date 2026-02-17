@@ -50,6 +50,11 @@ curl -sS -H "x-client-id: device-abc" \
 - DexScreener: `price_usd`, `volume_24h`, `liquidity_usd`, `fdv`, `price_change_5m`, `price_change_1h`
 - GoPlus: `goplus_is_honeypot`, `goplus_buy_tax`, `goplus_sell_tax`, `goplus_trust_list`, `goplus_is_blacklisted`, `goplus_status`
 - Intelligence: `safety_score(0~100)`, `is_surging`
+URL 분리:
+- `dex_chart_url`: DexScreener 차트/스왑 링크(`pair.url`)
+- `official_website_url`: 공식 웹사이트(`info.websites[0].url`, 없으면 null)
+- `twitter_url`, `telegram_url`: `info.socials[]`에서 추출(없으면 null)
+추가로, 프론트에서 위험 사유를 바로 표시할 수 있도록 `risk_factors: string[]`가 포함됩니다(감점제 산정 결과).
 
 위험 자산도 포함해서 확인(운영/디버그용):
 
@@ -81,6 +86,9 @@ curl -sS -H "x-client-id: device-abc" \
   - `captured_price`(저장 시점) + `current_price`(현재 시점)를 함께 반환합니다.
   - `roi_since_captured`도 함께 내려주지만, 프론트에서 즉시 재계산해도 됩니다.
   - GoPlus 보안 필드도 병합하여 반환합니다(`goplus_*`).
+  - `safety_score`는 **감점제(Deduction Model)**로 산정되며, 데이터 누락/실패 시 **100을 절대 반환하지 않고** `50(Unknown)` 또는 `null`로 처리합니다.
+  - 상세 사유는 `risk_factors: string[]`로 내려옵니다.
+  - URL 분리 필드(`dex_chart_url`, `official_website_url`, `twitter_url`, `telegram_url`) 및 `urls` 객체가 함께 내려옵니다.
 
 - **Headers**
   - `x-client-id`: 필수

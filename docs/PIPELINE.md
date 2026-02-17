@@ -77,6 +77,10 @@
 - **스캐닝 상태**
   - GoPlus 데이터가 없거나 실패 시 `goplus_status: scanning|unsupported`
   - 기본값은 “빈칸 방지”를 위해 **스캐닝 토큰도 반환**(필요 시 `include_scanning=false`)
+- **Safety Score(감점제)**
+  - 기본 100점에서 시작해 리스크 신호마다 감점합니다.
+  - GoPlus 데이터가 누락/실패한 Unknown 상태는 **절대 100을 반환하지 않고** `50(Unknown)` 또는 `null`로 처리합니다.
+  - 상세 사유는 `risk_factors: string[]`로 반환됩니다.
 - **Seen 기록**
   - 응답으로 내려간 토큰은 `public.seen_tokens(user_device_id, token_id)`에 upsert되어 다음 피드에서 제외됩니다.
 - **응답 타입**
@@ -118,6 +122,10 @@
 
 - **Feed Snapshot**
   - `public.tokens` (transient, TTL 대상)
+    - URL 분리 컬럼:
+      - `dex_chart_url`: DexScreener 차트/스왑 링크(`pair.url`)
+      - `official_website_url`: 공식 웹사이트(`info.websites[0].url`, 없으면 null)
+      - `twitter_url`, `telegram_url`: `info.socials[]`에서 추출(없으면 null)
 - **Personalization**
   - `public.seen_tokens` (device 기반 anti-join)
   - `public.wishlist` (persistent, captured_price/captured_at)

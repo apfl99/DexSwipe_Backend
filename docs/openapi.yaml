@@ -248,6 +248,10 @@ components:
         symbol: { type: string, nullable: true }
         logo_url: { type: string, nullable: true }
         website_url: { type: string, nullable: true }
+        official_website_url: { type: string, nullable: true }
+        dex_chart_url: { type: string, nullable: true }
+        twitter_url: { type: string, nullable: true }
+        telegram_url: { type: string, nullable: true }
         price_usd: { type: number, nullable: true }
         liquidity_usd: { type: number, nullable: true }
         volume_24h: { type: number, nullable: true }
@@ -258,6 +262,9 @@ components:
         price_change_1h: { type: number, nullable: true }
         is_surging: { type: boolean }
         is_security_risk: { type: boolean }
+        risk_factors:
+          type: array
+          items: { type: string }
         safety_score:
           type: integer
           minimum: 0
@@ -269,10 +276,30 @@ components:
         goplus_scanned_at: { type: string, format: date-time, nullable: true }
         goplus_cannot_sell: { type: boolean, nullable: true }
         goplus_is_honeypot: { type: boolean, nullable: true }
+        goplus_is_blacklisted: { type: boolean, nullable: true }
+        goplus_cannot_sell_all: { type: boolean, nullable: true }
         goplus_buy_tax: { type: number, nullable: true }
         goplus_sell_tax: { type: number, nullable: true }
         goplus_trust_list: { type: boolean, nullable: true }
-        goplus_is_blacklisted: { type: boolean, nullable: true }
+        goplus_is_proxy: { type: boolean, nullable: true }
+        goplus_transfer_pausable: { type: boolean, nullable: true }
+        goplus_slippage_modifiable: { type: boolean, nullable: true }
+        goplus_external_call: { type: boolean, nullable: true }
+        goplus_owner_change_balance: { type: boolean, nullable: true }
+        goplus_hidden_owner: { type: boolean, nullable: true }
+        goplus_cannot_buy: { type: boolean, nullable: true }
+        goplus_trading_cooldown: { type: boolean, nullable: true }
+        goplus_is_open_source: { type: boolean, nullable: true }
+        goplus_is_mintable: { type: boolean, nullable: true }
+        goplus_take_back_ownership: { type: boolean, nullable: true }
+        urls:
+          type: object
+          nullable: true
+          properties:
+            official_website: { type: string, nullable: true }
+            dex_chart: { type: string, nullable: true }
+            twitter: { type: string, nullable: true }
+            telegram: { type: string, nullable: true }
     FeedItemMin:
       type: object
       required: [id, chain_id, token_address, is_security_risk, safety_score, is_surging, goplus_status]
@@ -282,6 +309,10 @@ components:
         token_address: { type: string }
         logo_url: { type: string, nullable: true }
         symbol: { type: string, nullable: true }
+        official_website_url: { type: string, nullable: true }
+        dex_chart_url: { type: string, nullable: true }
+        twitter_url: { type: string, nullable: true }
+        telegram_url: { type: string, nullable: true }
         price_usd: { type: number, nullable: true }
         liquidity_usd: { type: number, nullable: true }
         volume_24h: { type: number, nullable: true }
@@ -289,6 +320,9 @@ components:
         price_change_5m: { type: number, nullable: true }
         price_change_1h: { type: number, nullable: true }
         is_security_risk: { type: boolean }
+        risk_factors:
+          type: array
+          items: { type: string }
         safety_score:
           type: integer
           minimum: 0
@@ -312,6 +346,10 @@ components:
         token_address: { type: string }
         symbol: { type: string, nullable: true }
         logo_url: { type: string, nullable: true }
+        official_website_url: { type: string, nullable: true }
+        dex_chart_url: { type: string, nullable: true }
+        twitter_url: { type: string, nullable: true }
+        telegram_url: { type: string, nullable: true }
         captured_price: { type: number, nullable: true }
         captured_at: { type: string, format: date-time, nullable: true }
         current_price: { type: number, nullable: true }
@@ -323,13 +361,37 @@ components:
           type: integer
           minimum: 0
           maximum: 100
+        is_security_risk: { type: boolean }
+        risk_factors:
+          type: array
+          items: { type: string }
         updated_at: { type: string, format: date-time }
         goplus_status:
           type: string
           description: "GoPlus merge status: live|cached|stale|scanning|unsupported"
         goplus_is_honeypot: { type: boolean, nullable: true }
+        goplus_is_blacklisted: { type: boolean, nullable: true }
+        goplus_cannot_sell_all: { type: boolean, nullable: true }
         goplus_buy_tax: { type: number, nullable: true }
         goplus_sell_tax: { type: number, nullable: true }
         goplus_trust_list: { type: boolean, nullable: true }
-        goplus_is_blacklisted: { type: boolean, nullable: true }
+        goplus_is_proxy: { type: boolean, nullable: true }
+        goplus_transfer_pausable: { type: boolean, nullable: true }
+        goplus_slippage_modifiable: { type: boolean, nullable: true }
+        goplus_external_call: { type: boolean, nullable: true }
+        goplus_owner_change_balance: { type: boolean, nullable: true }
+        goplus_hidden_owner: { type: boolean, nullable: true }
+        goplus_cannot_buy: { type: boolean, nullable: true }
+        goplus_trading_cooldown: { type: boolean, nullable: true }
+        goplus_is_open_source: { type: boolean, nullable: true }
+        goplus_is_mintable: { type: boolean, nullable: true }
+        goplus_take_back_ownership: { type: boolean, nullable: true }
+        urls:
+          type: object
+          nullable: true
+          properties:
+            official_website: { type: string, nullable: true }
+            dex_chart: { type: string, nullable: true }
+            twitter: { type: string, nullable: true }
+            telegram: { type: string, nullable: true }
 

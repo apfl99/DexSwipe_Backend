@@ -5,6 +5,7 @@ import { fetchJsonWithRetry } from "../_shared/dexscreener.ts";
 type Pair = Record<string, unknown> & {
   chainId?: string;
   pairAddress?: string;
+  url?: string;
   baseToken?: { address?: string };
   quoteToken?: { address?: string };
   priceUsd?: string;
@@ -15,7 +16,11 @@ type Pair = Record<string, unknown> & {
   fdv?: number;
   marketCap?: number;
   pairCreatedAt?: number;
-  info?: { imageUrl?: string; websites?: Array<{ url?: string }> };
+  info?: {
+    imageUrl?: string;
+    websites?: Array<{ url?: string }>;
+    socials?: Array<{ type?: string; url?: string }>;
+  };
 };
 
 function json(body: unknown, init?: ResponseInit) {
@@ -75,6 +80,24 @@ function websiteUrl(pair: Pair): string | null {
   const w = pair.info?.websites;
   const u0 = Array.isArray(w) && w.length ? w[0]?.url : undefined;
   return typeof u0 === "string" && u0.trim() ? u0.trim() : null;
+}
+
+function dexChartUrl(pair: Pair): string | null {
+  const u = pair.url;
+  return typeof u === "string" && u.trim() ? u.trim() : null;
+}
+
+function socialUrl(pair: Pair, kind: "twitter" | "telegram"): string | null {
+  const s = pair.info?.socials;
+  if (!Array.isArray(s) || !s.length) return null;
+  for (const it of s) {
+    const t = typeof it?.type === "string" ? it.type.toLowerCase() : "";
+    const u = typeof it?.url === "string" ? it.url.trim() : "";
+    if (!u) continue;
+    if (kind === "twitter" && (t === "twitter" || t === "x")) return u;
+    if (kind === "telegram" && t === "telegram") return u;
+  }
+  return null;
 }
 
 const MAX_JOBS_PER_INVOCATION = 120; // yields up to 4 calls/chain if chunk=30
@@ -209,6 +232,10 @@ Deno.serve(async (req) => {
             // Apply hype filter before persisting into the lean `tokens` table.
             const liqForHype = liquidity_usd ?? 0;
             if (liqForHype >= hypeMinLiquidityUsd && txns_1h > hypeMinTxns1h) {
+              const official = websiteUrl(best);
+              const chart = dexChartUrl(best);
+              const twitter = socialUrl(best, "twitter");
+              const telegram = socialUrl(best, "telegram");
               const tokensUp = await supabase.from("tokens").upsert(
                 {
                   token_id: tokenId,
@@ -217,7 +244,12 @@ Deno.serve(async (req) => {
                   name: (best.baseToken as any)?.name ?? null,
                   symbol: (best.baseToken as any)?.symbol ?? null,
                   logo_url: webp((best.info as any)?.imageUrl ?? null),
-                  website_url: websiteUrl(best),
+                  // Backward compatibility: website_url == official website (nullable)
+                  website_url: official,
+                  official_website_url: official,
+                  dex_chart_url: chart,
+                  twitter_url: twitter,
+                  telegram_url: telegram,
                   price_usd,
                   liquidity_usd,
                   volume_24h,
