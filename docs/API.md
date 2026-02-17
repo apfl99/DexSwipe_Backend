@@ -10,9 +10,13 @@
 
 토큰 카드 피드 조회 API.
 
+- **Headers**
+  - `x-client-id`: 클라이언트/디바이스 식별자(필수). seen 제외(anti-join)에 사용됩니다.
+
 - **Query**
+  - `format`: `full|min` (기본 `full`)
   - `limit`: 1~100 (기본 30)
-  - `offset`: 0 이상 (기본 0)
+  - `cursor`: ISO timestamp (선택). `updated_at < cursor` 범위를 가져옵니다.
   - `chains`: `solana,base` 형태
   - `min_liquidity_usd`: 최소 유동성(USD)
   - `min_volume_24h`: 24h 거래량 최소값(USD)
@@ -27,13 +31,25 @@
 - **예시**
 
 ```bash
-curl -sS "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base&min_liquidity_usd=10000"
+curl -sS -H "x-client-id: device-abc" \
+  "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base&min_liquidity_usd=10000"
 ```
+
+초경량(min) 모드:
+
+```bash
+curl -sS -H "x-client-id: device-abc" \
+  "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base&format=min" \
+  -D - | head -n 30
+```
+
+`format=min`일 때는 응답이 **flat JSON array**이고, 다음 페이지 커서는 응답 헤더 `x-next-cursor`로 내려옵니다.
 
 위험 자산도 포함해서 확인(운영/디버그용):
 
 ```bash
-curl -sS "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base&include_risky=true"
+curl -sS -H "x-client-id: device-abc" \
+  "$SUPABASE_URL/functions/v1/get-feed?limit=20&chains=solana,base&include_risky=true"
 ```
 
 ### OpenAPI

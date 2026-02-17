@@ -127,6 +127,11 @@ Deno.serve(async (req) => {
     return Number.isFinite(n) && n > 0 ? n : 300;
   })();
   let cuUsed = 0;
+  const cacheTtlHours = (() => {
+    const v = Deno.env.get("GOPLUS_CACHE_TTL_HOURS") ?? "6";
+    const n = Number.parseInt(v, 10);
+    return Number.isFinite(n) && n > 0 ? n : 6;
+  })();
 
   const batchSize = (() => {
     const u = new URL(req.url);
@@ -170,6 +175,39 @@ Deno.serve(async (req) => {
       const tokenAddress = job.token_address;
 
       try {
+        // Cache-first: if we have a fresh cache row, avoid consuming GoPlus CU.
+        const cached = await supabase
+          .from("goplus_token_security_cache")
+          .select("scanned_at,always_deny,deny_reasons")
+          .eq("chain_id", chainId)
+          .eq("token_address", tokenAddress)
+          .maybeSingle();
+        if (!cached.error && cached.data?.scanned_at) {
+          const scannedAtMs = new Date(cached.data.scanned_at as string).getTime();
+          if (Number.isFinite(scannedAtMs) && Date.now() - scannedAtMs < cacheTtlHours * 60 * 60 * 1000) {
+            await supabase
+              .from("token_security_scan_queue")
+              .update({
+                status: "completed",
+                attempts: job.attempts,
+                locked_at: null,
+                updated_at: new Date().toISOString(),
+                last_error: null,
+                last_scanned_at: new Date().toISOString(),
+                next_run_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+              })
+              .eq("chain_id", chainId)
+              .eq("token_address", tokenAddress);
+            processed.push({
+              chain_id: chainId,
+              token_address: tokenAddress,
+              ok: true,
+              always_deny: (cached.data as any)?.always_deny ?? false,
+            });
+            continue;
+          }
+        }
+
         const mapping = mappings.get(chainId);
         if (!mapping) {
           throw new Error(`UNSUPPORTED_CHAIN: ${chainId} (missing chain_mappings row)`);

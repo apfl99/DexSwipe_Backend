@@ -95,7 +95,7 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
 
   set +e
   DBURL_OUT="$(
-    supabase db push --db-url "${DB_URL}" --yes 2>&1
+    printf 'y\n' | supabase db push --db-url "${DB_URL}" --yes 2>&1
   )"
   DBURL_CODE="$?"
   set -e
@@ -118,7 +118,7 @@ supabase link --project-ref "${PROJECT_REF}" --password "${SUPABASE_DB_PASSWORD}
 echo "3) Push migrations"
   set +e
   PUSH_OUT="$(
-    supabase db push --password "${SUPABASE_DB_PASSWORD}" --yes 2>&1
+    printf 'y\n' | supabase db push --password "${SUPABASE_DB_PASSWORD}" --yes 2>&1
   )"
   PUSH_CODE="$?"
   set -e
@@ -141,7 +141,7 @@ echo "3) Push migrations"
 
       set +e
       POOL_OUT="$(
-        supabase db push --db-url "${DB_URL}" --yes 2>&1
+        printf 'y\n' | supabase db push --db-url "${DB_URL}" --yes 2>&1
       )"
       POOL_CODE="$?"
       set -e

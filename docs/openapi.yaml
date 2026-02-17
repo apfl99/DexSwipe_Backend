@@ -15,9 +15,27 @@ paths:
     get:
       summary: Get swipe feed tokens
       description: |
-        Returns token cards composed from DexScreener raw sources + market data + GoPlus cache.
-        Tokens with `security.always_deny=true` are excluded.
+        Returns swipe feed tokens.
+        - Data source: `public.tokens` (denormalized, lean for free-tier)
+        - Pagination: cursor (keyset) using `tokens.updated_at`
+        - Anti-join: excludes already seen tokens via `seen_tokens(user_device_id, token_id)`
+        - Risk filter: excludes security/risky tokens unless `include_risky=true`
       parameters:
+        - in: header
+          name: x-client-id
+          required: true
+          schema:
+            type: string
+          description: Client/device identifier used for anti-join (seen_tokens).
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum: [full, min]
+            default: full
+          description: |
+            `full`: object response with `tokens[]` + `next_cursor`.
+            `min`: flat JSON array response (mobile-optimized) + `x-next-cursor` header.
         - in: query
           name: limit
           schema:
@@ -26,14 +44,14 @@ paths:
             maximum: 100
             default: 30
         - in: query
-          name: offset
+          name: cursor
+          description: Keyset cursor (ISO timestamp). Returns items with `updated_at < cursor`.
           schema:
-            type: integer
-            minimum: 0
-            default: 0
+            type: string
+            format: date-time
         - in: query
           name: chains
-          description: Comma-separated chain ids (e.g. "solana,base")
+          description: Comma-separated chain ids (e.g. "solana,base"). Supported: solana, base, sui, tron.
           schema:
             type: string
         - in: query
@@ -56,61 +74,66 @@ paths:
       responses:
         "200":
           description: OK
+          headers:
+            x-next-cursor:
+              description: Present when `format=min` (empty string when no more).
+              schema:
+                type: string
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  tokens:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/FeedItem"
-                  limit:
-                    type: integer
-                  next_offset:
-                    type: integer
-                  notes:
-                    type: object
+                oneOf:
+                  - $ref: "#/components/schemas/FeedResponseFull"
+                  - $ref: "#/components/schemas/FeedResponseMin"
 components:
   schemas:
-    FeedItem:
+    FeedResponseFull:
       type: object
-      required: [chain_id, token_address, fetched_at, profile]
       properties:
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedItemFull"
+        limit:
+          type: integer
+        cursor:
+          type: string
+          nullable: true
+          format: date-time
+        next_cursor:
+          type: string
+          nullable: true
+          format: date-time
+        notes:
+          type: object
+    FeedResponseMin:
+      type: array
+      items:
+        $ref: "#/components/schemas/FeedItemMin"
+    FeedItemFull:
+      type: object
+      required: [token_id, chain_id, token_address, updated_at]
+      properties:
+        token_id:
+          type: string
         chain_id:
           type: string
         token_address:
           type: string
-        fetched_at:
-          type: string
-          format: date-time
-        profile:
-          description: DexScreener token profile raw object
-          type: object
-          additionalProperties: true
-        boost:
-          nullable: true
-          description: DexScreener boost raw object (if present)
-          type: object
-          additionalProperties: true
-        takeover:
-          nullable: true
-          description: DexScreener community takeover raw object (if present)
-          type: object
-          additionalProperties: true
-        market:
-          nullable: true
-          type: object
-          properties:
-            price_usd: { type: number, nullable: true }
-            liquidity_usd: { type: number, nullable: true }
-            volume_24h: { type: number, nullable: true }
-            fdv: { type: number, nullable: true }
-            market_cap: { type: number, nullable: true }
-            updated_at: { type: string, format: date-time }
-            raw_best_pair:
-              type: object
-              additionalProperties: true
+        name: { type: string, nullable: true }
+        symbol: { type: string, nullable: true }
+        logo_url: { type: string, nullable: true }
+        website_url: { type: string, nullable: true }
+        price_usd: { type: number, nullable: true }
+        liquidity_usd: { type: number, nullable: true }
+        volume_24h: { type: number, nullable: true }
+        fdv: { type: number, nullable: true }
+        market_cap: { type: number, nullable: true }
+        price_change_1h: { type: number, nullable: true }
+        buys_24h: { type: integer, nullable: true }
+        sells_24h: { type: integer, nullable: true }
+        pair_created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, format: date-time }
         security:
           nullable: true
           type: object
@@ -127,9 +150,6 @@ components:
           nullable: true
           type: object
           properties:
-            website_url:
-              type: string
-              nullable: true
             url_risk:
               nullable: true
               type: object
@@ -144,4 +164,14 @@ components:
                 is_rugpull_risk: { type: boolean, nullable: true }
                 risk_level: { type: string, nullable: true }
                 scanned_at: { type: string, format: date-time, nullable: true }
+    FeedItemMin:
+      type: object
+      required: [id, chain_id]
+      properties:
+        id: { type: string }
+        chain_id: { type: string }
+        logo_url: { type: string, nullable: true }
+        symbol: { type: string, nullable: true }
+        price_change_1h: { type: number, nullable: true }
+        is_security_risk: { type: boolean }
 

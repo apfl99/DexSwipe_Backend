@@ -117,37 +117,37 @@ curl -sS -X POST \
   -d '{}'
 ```
 
-## DexScreener 수집(주기 실행)
+## DexScreener 수집(주기 실행, 릴리즈/무료티어 최적화)
 
 ### 목표
 
-- DexScreener `token-profiles/latest/v1`에서 내려오는 **원본 데이터 전체를 JSONB로 저장**
-- 무료 레이트리밋 범위 내에서 **짧은 주기로 갱신**(현재: 5분/15분)
+- DexScreener에서 “최신 후보 토큰”을 **가볍게 수집(enqueue)** 하고
+- `tokens/v1`로 market 데이터를 가져와 **Hype Filter(유동성/트랜잭션)** 를 통과한 토큰만 `public.tokens`에 저장합니다.
+- 원본(raw) JSONB 대량 저장은 제거하여 **500MB 무료 DB**에 맞춥니다.
 
 ### 저장 테이블
 
-- `public.dexscreener_token_profiles_raw`
-  - `(chain_id, token_address)`를 PK로 사용
-  - `raw jsonb`에 DexScreener 응답의 각 토큰 객체를 그대로 저장
+- `public.dexscreener_market_update_queue`: (chain_id, token_address) 단위 업데이트 작업 큐
+- `public.tokens`: 릴리즈용 denormalized token 카드 데이터(필터 통과분만 저장)
 
 ### Edge Function
 
-- `supabase/functions/fetch-dexscreener-latest`
-  - DexScreener 최신 프로필을 가져와 `dexscreener_token_profiles_raw`에 upsert 합니다.
-  - 보호용으로 `DEXSWIPE_CRON_SECRET`가 설정되어 있으면 `x-cron-secret` 헤더가 일치할 때만 실행됩니다.
+- `supabase/functions/scheduled-fetch`
+  - DexScreener `token-profiles/latest/v1`를 호출해 **체인 라운드로빈**으로 후보 토큰을 큐에 넣습니다.
+  - `DEXSWIPE_CRON_SECRET`가 설정되어 있으면 `x-cron-secret` 헤더가 일치할 때만 실행됩니다.
+- `supabase/functions/fetch-dexscreener-market`
+  - 큐를 drain하며 `tokens/v1`로 market을 가져오고, Hype Filter 통과분만 `public.tokens`에 upsert 합니다.
 
 ### 스케줄링(pg_cron + pg_net)
 
 Supabase 공식 문서 권장 방식대로 `pg_cron` + `pg_net`로 Edge Function을 호출합니다.
 관련 문서: [Scheduling Edge Functions](https://supabase.com/docs/guides/functions/schedule-functions)
 
-스케줄은 레이트리밋을 넘지 않는 선에서 아래처럼 구성되어 있습니다.
-- profiles(latest): 15분마다
-- boosts(latest): 30분마다
-- boosts(top): 60분마다
-- takeovers(latest): 60분마다
-- market(tokens/v1): 15분마다
-- GoPlus worker: 30분마다
+스케줄은 무료 레이트리밋을 넘지 않는 선에서 아래처럼 구성되어 있습니다.
+- scheduled-fetch(round-robin enqueue): 5분마다(함수 내부에서 분 단위 로테이션으로 skip 포함)
+- market worker(tokens/v1): 5분마다
+- GoPlus security worker: 30분마다
+- GoPlus quality worker: 2시간마다
 
 #### 필요한 Vault 시크릿
 
@@ -166,17 +166,22 @@ select vault.create_secret('<DEXSWIPE_CRON_SECRET>', 'dexswipe_cron_secret');
 ### 수동 실행(즉시 한 번 돌려보기)
 
 ```bash
-supabase functions deploy fetch-dexscreener-latest --no-verify-jwt
+supabase functions deploy scheduled-fetch --no-verify-jwt
+supabase functions deploy fetch-dexscreener-market --no-verify-jwt
 curl -sS -X POST \
   -H "x-cron-secret: $DEXSWIPE_CRON_SECRET" \
-  "$SUPABASE_URL/functions/v1/fetch-dexscreener-latest"
+  "$SUPABASE_URL/functions/v1/scheduled-fetch"
+
+curl -sS -X POST \
+  -H "x-cron-secret: $DEXSWIPE_CRON_SECRET" \
+  "$SUPABASE_URL/functions/v1/fetch-dexscreener-market"
 ```
 
 ## GoPlus Security 연동(큐 + 워커)
 
 ### 개요
 
-- `fetch-dexscreener-latest`가 토큰을 저장한 뒤, **지원 체인만** `token_security_scan_queue`에 스캔 작업을 적재합니다(Distribution).
+- `fetch-dexscreener-market`가 `tokens`를 upsert할 때, **지원 체인만** `token_security_scan_queue`에 스캔 작업을 적재합니다(Distribution).
 - `goplus-security-worker`가 큐를 주기적으로 가져와(Processing) GoPlus API를 호출하고,
   결과를 `goplus_token_security_cache`에 저장합니다.
 - **Always-Deny 원칙(치명 리스크 즉시 제외)**을 위해 `always_deny`, `deny_reasons`를 함께 저장합니다.
@@ -383,10 +388,11 @@ supabase secrets set GOPLUS_API_KEY="<YOUR_GOPLUS_API_KEY>" --yes
 
 3) 배포/반영
 - `bash scripts/push_remote_migrations.sh`
-- `supabase functions deploy fetch-dexscreener-latest --no-verify-jwt --use-api --yes`
-- `supabase functions deploy fetch-dexscreener-boosts --no-verify-jwt --use-api --yes`
-- `supabase functions deploy fetch-dexscreener-takeovers --no-verify-jwt --use-api --yes`
+- `supabase functions deploy scheduled-fetch --no-verify-jwt --use-api --yes`
+- `supabase functions deploy fetch-dexscreener-market --no-verify-jwt --use-api --yes`
+- `supabase functions deploy get-feed --no-verify-jwt --use-api --yes`
 - `supabase functions deploy goplus-security-worker --no-verify-jwt --use-api --yes`
+- `supabase functions deploy goplus-quality-worker --no-verify-jwt --use-api --yes`
 
 4) 검증(원클릭)
 - `bash scripts/verify_pipeline.sh`

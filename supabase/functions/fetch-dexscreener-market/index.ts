@@ -10,8 +10,12 @@ type Pair = Record<string, unknown> & {
   priceUsd?: string;
   liquidity?: { usd?: number };
   volume?: Record<string, number>;
+  txns?: Record<string, { buys?: number; sells?: number }>;
+  priceChange?: Record<string, number>;
   fdv?: number;
   marketCap?: number;
+  pairCreatedAt?: number;
+  info?: { imageUrl?: string; websites?: Array<{ url?: string }> };
 };
 
 function json(body: unknown, init?: ResponseInit) {
@@ -50,6 +54,29 @@ function pickBestPair(pairs: Pair[], tokenAddr: string): Pair | null {
   return relevant[0];
 }
 
+function int(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : null;
+  if (typeof v === "string") {
+    const n = Number.parseInt(v, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function webp(url: string | null): string | null {
+  if (!url) return null;
+  // Best-effort: force webp when the CDN supports it.
+  if (url.includes("format=auto")) return url.replace("format=auto", "format=webp");
+  return url;
+}
+
+function websiteUrl(pair: Pair): string | null {
+  const w = pair.info?.websites;
+  const u0 = Array.isArray(w) && w.length ? w[0]?.url : undefined;
+  return typeof u0 === "string" && u0.trim() ? u0.trim() : null;
+}
+
 const MAX_JOBS_PER_INVOCATION = 120; // yields up to 4 calls/chain if chunk=30
 
 Deno.serve(async (req) => {
@@ -76,6 +103,18 @@ Deno.serve(async (req) => {
     const v = Deno.env.get("SECURITY_ENQUEUE_MIN_VOLUME_24H") ?? "10000";
     const n = Number.parseFloat(v);
     return Number.isFinite(n) && n >= 0 ? n : 10000;
+  })();
+
+  // Hype filter: keep DB lean by only persisting tokens meeting quality threshold.
+  const hypeMinLiquidityUsd = (() => {
+    const v = Deno.env.get("HYPE_MIN_LIQUIDITY_USD") ?? "10000";
+    const n = Number.parseFloat(v);
+    return Number.isFinite(n) && n >= 0 ? n : 10000;
+  })();
+  const hypeMinTxns1h = (() => {
+    const v = Deno.env.get("HYPE_MIN_TXNS_1H") ?? "10";
+    const n = Number.parseInt(v, 10);
+    return Number.isFinite(n) && n >= 0 ? n : 10;
   })();
 
   const supportedChainsRes = await supabase.from("chain_mappings").select("dexscreener_chain_id");
@@ -133,24 +172,11 @@ Deno.serve(async (req) => {
               continue;
             }
 
-            const row = {
-              chain_id: chain,
-              token_address: it.token,
-              best_pair_address: best.pairAddress ?? null,
-              raw_best_pair: best,
-              price_usd: num(best.priceUsd),
-              liquidity_usd: num(best.liquidity?.usd),
-              volume_24h: volume24h(best),
-              fdv: num(best.fdv),
-              market_cap: num(best.marketCap),
-              fetched_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            };
-
-            const up = await supabase
-              .from("dexscreener_token_market_data")
-              .upsert(row, { onConflict: "chain_id,token_address" });
-            if (up.error) throw new Error(`market upsert failed: ${up.error.message}`);
+            const price_usd = num(best.priceUsd);
+            const liquidity_usd = num(best.liquidity?.usd);
+            const volume_24h = volume24h(best);
+            const fdv = num(best.fdv);
+            const market_cap = num(best.marketCap);
 
             await supabase
               .from("dexscreener_market_update_queue")
@@ -166,9 +192,49 @@ Deno.serve(async (req) => {
               .eq("chain_id", chain)
               .eq("token_address", it.token);
 
+            // Release tokens table upsert (denormalized fields for fast get-feed).
+            const price_change_1h = num((best.priceChange as any)?.h1);
+            const buys_24h = int((best.txns as any)?.h24?.buys);
+            const sells_24h = int((best.txns as any)?.h24?.sells);
+            const buys_1h = int((best.txns as any)?.h1?.buys) ?? 0;
+            const sells_1h = int((best.txns as any)?.h1?.sells) ?? 0;
+            const txns_1h = buys_1h + sells_1h;
+            const pairCreatedAtMs = int(best.pairCreatedAt);
+            const pair_created_at = pairCreatedAtMs ? new Date(pairCreatedAtMs).toISOString() : null;
+            const tokenId = `${chain}:${it.token}`;
+
+            // Apply hype filter before persisting into the lean `tokens` table.
+            const liqForHype = liquidity_usd ?? 0;
+            if (liqForHype >= hypeMinLiquidityUsd && txns_1h > hypeMinTxns1h) {
+              const tokensUp = await supabase.from("tokens").upsert(
+                {
+                  token_id: tokenId,
+                  chain_id: chain,
+                  token_address: it.token,
+                  name: (best.baseToken as any)?.name ?? null,
+                  symbol: (best.baseToken as any)?.symbol ?? null,
+                  logo_url: webp((best.info as any)?.imageUrl ?? null),
+                  website_url: websiteUrl(best),
+                  price_usd,
+                  liquidity_usd,
+                  volume_24h,
+                  fdv,
+                  market_cap,
+                  price_change_1h,
+                  buys_24h,
+                  sells_24h,
+                  pair_created_at,
+                  last_fetched_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: "chain_id,token_address" },
+              );
+              if (tokensUp.error) throw new Error(`tokens upsert failed: ${tokensUp.error.message}`);
+            }
+
             // Enqueue GoPlus scan only for tokens passing quality gate.
-            const liq = row.liquidity_usd ?? 0;
-            const vol = row.volume_24h ?? 0;
+            const liq = liquidity_usd ?? 0;
+            const vol = volume_24h ?? 0;
             if (supportedSecurityChains.has(chain) && liq >= scanMinLiquidityUsd && vol >= scanMinVolume24h) {
               await supabase
                 .from("token_security_scan_queue")

@@ -14,60 +14,6 @@ function json(body: unknown, init?: ResponseInit) {
   });
 }
 
-function pickLinksFromProfileRaw(raw: unknown): string[] {
-  // DexScreener profile has `links: [{ url, type?, label? }]` and sometimes `url` field.
-  const out: string[] = [];
-  if (!raw || typeof raw !== "object") return out;
-  const obj = raw as Record<string, unknown>;
-  const directUrl = obj["url"];
-  if (typeof directUrl === "string") out.push(directUrl);
-  const links = obj["links"];
-  if (Array.isArray(links)) {
-    for (const l of links) {
-      if (!l || typeof l !== "object") continue;
-      const u = (l as any).url;
-      if (typeof u === "string") out.push(u);
-    }
-  }
-  // normalize + de-dup + cap
-  const dedup = new Set<string>();
-  const final: string[] = [];
-  for (const u of out) {
-    const s = u.trim();
-    if (!s) continue;
-    if (dedup.has(s)) continue;
-    dedup.add(s);
-    final.push(s);
-    if (final.length >= 3) break;
-  }
-  return final;
-}
-
-function pickWebsitesFromMarketRaw(rawBestPair: unknown): string[] {
-  // DexScreener pair info has `info.websites: [{ url, label? }]`
-  const out: string[] = [];
-  if (!rawBestPair || typeof rawBestPair !== "object") return out;
-  const info = (rawBestPair as any).info;
-  if (!info || typeof info !== "object") return out;
-  const websites = (info as any).websites;
-  if (!Array.isArray(websites)) return out;
-  for (const w of websites) {
-    if (!w || typeof w !== "object") continue;
-    const u = (w as any).url;
-    if (typeof u === "string" && u.trim()) out.push(u.trim());
-    if (out.length >= 3) break;
-  }
-  // de-dup
-  const dedup = new Set<string>();
-  const final: string[] = [];
-  for (const u of out) {
-    if (dedup.has(u)) continue;
-    dedup.add(u);
-    final.push(u);
-  }
-  return final;
-}
-
 async function fetchGoPlusJson(url: string, apiKey: string | null): Promise<unknown> {
   const headers: Record<string, string> = { Accept: "application/json" };
   const attempts: Array<() => Promise<Response>> = [];
@@ -168,27 +114,15 @@ Deno.serve(async (req) => {
       const chainId = job.chain_id;
       const tokenAddress = job.token_address;
       try {
-        // Load profile raw (for links)
-        const pr = await supabase
-          .from("dexscreener_token_profiles_raw")
-          .select("raw")
+        // Lean mode: use denormalized tokens.website_url only (no raw profile/pair storage).
+        const tr = await supabase
+          .from("tokens")
+          .select("website_url")
           .eq("chain_id", chainId)
           .eq("token_address", tokenAddress)
           .maybeSingle();
-        const profileRaw = pr.data?.raw ?? null;
-        let links = pickLinksFromProfileRaw(profileRaw);
-
-        // Fallback: use market pair info websites (better for non-profiled tokens)
-        if (links.length === 0) {
-          const mr = await supabase
-            .from("dexscreener_token_market_data")
-            .select("raw_best_pair")
-            .eq("chain_id", chainId)
-            .eq("token_address", tokenAddress)
-            .maybeSingle();
-          const bestPair = (mr.data as any)?.raw_best_pair ?? null;
-          links = pickWebsitesFromMarketRaw(bestPair);
-        }
+        const websiteUrl = (tr.data as any)?.website_url;
+        const links = typeof websiteUrl === "string" && websiteUrl.trim() ? [websiteUrl.trim()] : [];
 
         // 1) URL checks (phishing_site + dapp_security) with cache
         for (const url of links) {
