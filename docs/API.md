@@ -55,6 +55,21 @@ URL 분리:
 - `official_website_url`: 공식 웹사이트(`info.websites[0].url`, 없으면 null)
 - `twitter_url`, `telegram_url`: `info.socials[]`에서 추출(없으면 null)
 추가로, 프론트에서 위험 사유를 바로 표시할 수 있도록 `risk_factors: string[]`가 포함됩니다(감점제 산정 결과).
+Checks(완성도):
+- `checks_state`: `pending|complete|limited|unsupported`
+  - `pending`: 검사 대기/진행 중
+  - `complete`: 검사 데이터 충분(상태 안정)
+  - `limited`: 점수는 산출했지만 상세 체크 일부 누락
+  - `unsupported`: 체인 미지원
+프론트 렌더링 권장(혼선 방지):
+- **표시 우선순위**: `checks_state`를 1순위로 사용하고, `goplus_status`는 디버그/보조 텍스트로만 사용합니다.
+- **라벨 매핑(예시)**:
+  - `pending` → `PENDING`
+  - `limited` → `LIMITED`
+  - `complete` → `COMPLETE`
+  - `unsupported` → `UNSUPPORTED`
+Txns(활동 지표):
+- `txns_24h`: 24h 거래 횟수(가능하면 `buys_24h+sells_24h` 기반)
 
 위험 자산도 포함해서 확인(운영/디버그용):
 
@@ -89,6 +104,7 @@ curl -sS -H "x-client-id: device-abc" \
   - `safety_score`는 **감점제(Deduction Model)**로 산정되며, 데이터 누락/실패 시 **100을 절대 반환하지 않고** `50(Unknown)` 또는 `null`로 처리합니다.
   - 상세 사유는 `risk_factors: string[]`로 내려옵니다.
   - URL 분리 필드(`dex_chart_url`, `official_website_url`, `twitter_url`, `telegram_url`) 및 `urls` 객체가 함께 내려옵니다.
+  - `checks_state`를 함께 내려 프론트에서 “Checks LIMITED/COMPLETE” 등을 안정적으로 표시할 수 있습니다.
 
 - **Headers**
   - `x-client-id`: 필수

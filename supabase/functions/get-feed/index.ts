@@ -286,6 +286,8 @@ type GoPlusSignals = {
   take_back_ownership: boolean | null;
 };
 
+type ChecksState = "pending" | "complete" | "limited" | "unsupported";
+
 function pct(n: number): string {
   return `${Math.round(n * 1000) / 10}%`;
 }
@@ -390,6 +392,28 @@ function scoreDeductionModel(s: GoPlusSignals): {
   const finalScore = clampScore(score);
   const isRisk = finalScore < 60 || factors.length > 0;
   return { safety_score: finalScore, is_security_risk: isRisk, risk_factors: factors };
+}
+
+function checksStateFromScoring(
+  signals: GoPlusSignals,
+  scored: { risk_factors: string[] },
+  queueStatus: string | null,
+): ChecksState {
+  if (signals.status === "unsupported") return "unsupported";
+  if (queueStatus === "pending" || queueStatus === "processing") return "pending";
+  const rf = scored.risk_factors ?? [];
+  if (rf.includes("Unknown Risk (GoPlus missing fields)") || rf.includes("Unknown Risk (GoPlus unavailable)")) return "limited";
+  return "complete";
+}
+
+function normalizeGoPlusStatus(
+  raw: GoPlusSignals["status"],
+  checksState: ChecksState,
+): GoPlusSignals["status"] | "limited" | "pending" {
+  // UI-facing status: if checks are limited, expose it explicitly.
+  if (checksState === "pending") return "pending";
+  if (checksState === "limited") return "limited";
+  return raw;
 }
 
 Deno.serve(async (req) => {
@@ -685,6 +709,24 @@ Deno.serve(async (req) => {
     }),
   );
 
+  // 2.5) Check queue status to distinguish pending vs limited
+  const queueStatusByToken = new Map<string, string>();
+  await Promise.all(
+    Array.from(byChain.entries()).map(async ([chainId, items]) => {
+      const addrs = items.map((x) => x.token_address);
+      const qr = await supabase
+        .from("token_security_scan_queue")
+        .select("token_address,status")
+        .eq("chain_id", chainId)
+        .in("token_address", addrs);
+      if (!qr.error) {
+        for (const row of qr.data ?? []) {
+          queueStatusByToken.set(`${chainId}:${(row as any).token_address}`.toLowerCase(), String((row as any).status ?? ""));
+        }
+      }
+    }),
+  );
+
   // Mark returned tokens as seen (so next request excludes them).
   const seenNow = new Date().toISOString();
   await supabase
@@ -727,6 +769,13 @@ Deno.serve(async (req) => {
           take_back_ownership: go.take_back_ownership ?? null,
         };
         const scored = scoreDeductionModel(signals);
+        const queueStatus = queueStatusByToken.get(`${r.chain_id}:${r.token_address}`.toLowerCase()) ?? null;
+        const checks_state = checksStateFromScoring(signals, scored, queueStatus);
+        const goplus_status = normalizeGoPlusStatus(status, checks_state);
+        const buys_24h = typeof r.buys_24h === "number" ? r.buys_24h : null;
+        const sells_24h = typeof r.sells_24h === "number" ? r.sells_24h : null;
+        const txns_24h =
+          buys_24h !== null && sells_24h !== null ? buys_24h + sells_24h : buys_24h !== null ? buys_24h : sells_24h;
 
         return {
           id: r.token_id,
@@ -742,14 +791,17 @@ Deno.serve(async (req) => {
           liquidity_usd: toNum(dex.liquidity_usd) ?? toNum(r.liquidity_usd),
           volume_24h: toNum(dex.volume_24h) ?? toNum(r.volume_24h),
           fdv: toNum(dex.fdv) ?? toNum(r.fdv),
+          txns_24h,
           price_change_5m,
           price_change_1h,
           is_surging: price_change_5m !== null && price_change_1h !== null ? price_change_5m > price_change_1h : false,
           safety_score: scored.safety_score,
           is_security_risk: scored.is_security_risk,
           risk_factors: scored.risk_factors,
-          goplus_status: status,
+          goplus_status,
+          checks_state,
           goplus_is_honeypot: signals.is_honeypot,
+          goplus_cannot_sell_all: signals.cannot_sell_all,
           goplus_buy_tax: signals.buy_tax,
           goplus_sell_tax: signals.sell_tax,
           goplus_trust_list: go.trust_list ?? null,
@@ -794,6 +846,13 @@ Deno.serve(async (req) => {
         take_back_ownership: (go as any).take_back_ownership ?? null,
       };
       const scored = scoreDeductionModel(signals);
+      const queueStatus = queueStatusByToken.get(`${r.chain_id}:${r.token_address}`.toLowerCase()) ?? null;
+      const checks_state = checksStateFromScoring(signals, scored, queueStatus);
+      const goplus_status = normalizeGoPlusStatus(status, checks_state);
+      const buys_24h = typeof r.buys_24h === "number" ? r.buys_24h : null;
+      const sells_24h = typeof r.sells_24h === "number" ? r.sells_24h : null;
+      const txns_24h =
+        buys_24h !== null && sells_24h !== null ? buys_24h + sells_24h : buys_24h !== null ? buys_24h : sells_24h;
 
       return {
         token_id: r.token_id,
@@ -812,6 +871,9 @@ Deno.serve(async (req) => {
         volume_24h: toNum(dex.volume_24h) ?? toNum(r.volume_24h),
         fdv: toNum(dex.fdv) ?? toNum(r.fdv),
         market_cap: toNum(dex.market_cap) ?? toNum(r.market_cap),
+        buys_24h,
+        sells_24h,
+        txns_24h,
         price_change_5m,
         price_change_15m,
         price_change_1h,
@@ -819,7 +881,8 @@ Deno.serve(async (req) => {
         safety_score: scored.safety_score,
         is_security_risk: scored.is_security_risk,
         risk_factors: scored.risk_factors,
-        goplus_status: status,
+        goplus_status,
+        checks_state,
         goplus_scanned_at: (go as any).scanned_at ?? null,
         goplus_is_honeypot: signals.is_honeypot,
         goplus_is_blacklisted: signals.is_blacklisted,

@@ -110,7 +110,7 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 assert isinstance(data, list), "format=min must return JSON array"
 if data:
     x = data[0]
-    for k in ["id", "chain_id", "token_address", "goplus_status", "safety_score", "is_surging"]:
+    for k in ["id", "chain_id", "token_address", "goplus_status", "checks_state", "safety_score", "is_surging"]:
         assert k in x, f"missing key: {k}"
     assert "risk_factors" in x and isinstance(x["risk_factors"], list), "risk_factors must be array"
     for k in ["dex_chart_url", "official_website_url", "twitter_url", "telegram_url"]:
@@ -119,8 +119,12 @@ if data:
     for k in ["price_usd", "liquidity_usd", "volume_24h", "fdv", "price_change_5m", "price_change_1h"]:
         v = x.get(k, None)
         assert (v is None) or isinstance(v, (int, float)), f"{k} must be number/null (got {type(v)})"
+    # Txns activity metric must exist (int/null)
+    assert "txns_24h" in x, "missing key: txns_24h"
+    v = x.get("txns_24h", None)
+    assert (v is None) or isinstance(v, int), f"txns_24h must be int/null (got {type(v)})"
     # Unknown state must never be 100 (critical regression check)
-    if x.get("goplus_status") in ("scanning", "unsupported"):
+    if x.get("goplus_status") in ("pending", "unsupported"):
         assert x.get("safety_score") != 100, "unknown GoPlus state must not return 100"
 print("  ok: get-feed(min) schema + numeric types")
 PY

@@ -255,6 +255,9 @@ components:
         price_usd: { type: number, nullable: true }
         liquidity_usd: { type: number, nullable: true }
         volume_24h: { type: number, nullable: true }
+        buys_24h: { type: integer, nullable: true }
+        sells_24h: { type: integer, nullable: true }
+        txns_24h: { type: integer, nullable: true }
         fdv: { type: number, nullable: true }
         market_cap: { type: number, nullable: true }
         price_change_5m: { type: number, nullable: true }
@@ -272,7 +275,10 @@ components:
         updated_at: { type: string, format: date-time }
         goplus_status:
           type: string
-          description: "GoPlus merge status: live|cached|stale|scanning|unsupported"
+          description: "GoPlus merge status: live|cached|stale|pending|limited|unsupported"
+        checks_state:
+          type: string
+          description: "Checks completeness: pending|complete|limited|unsupported"
         goplus_scanned_at: { type: string, format: date-time, nullable: true }
         goplus_cannot_sell: { type: boolean, nullable: true }
         goplus_is_honeypot: { type: boolean, nullable: true }
@@ -317,6 +323,7 @@ components:
         liquidity_usd: { type: number, nullable: true }
         volume_24h: { type: number, nullable: true }
         fdv: { type: number, nullable: true }
+        txns_24h: { type: integer, nullable: true }
         price_change_5m: { type: number, nullable: true }
         price_change_1h: { type: number, nullable: true }
         is_security_risk: { type: boolean }
@@ -330,7 +337,10 @@ components:
         is_surging: { type: boolean }
         goplus_status:
           type: string
-          description: "GoPlus merge status: live|cached|stale|scanning|unsupported"
+          description: "GoPlus merge status: live|cached|stale|pending|limited|unsupported"
+        checks_state:
+          type: string
+          description: "Checks completeness: pending|complete|limited|unsupported"
         goplus_is_honeypot: { type: boolean, nullable: true }
         goplus_buy_tax: { type: number, nullable: true }
         goplus_sell_tax: { type: number, nullable: true }
@@ -368,7 +378,10 @@ components:
         updated_at: { type: string, format: date-time }
         goplus_status:
           type: string
-          description: "GoPlus merge status: live|cached|stale|scanning|unsupported"
+          description: "GoPlus merge status: live|cached|stale|pending|limited|unsupported"
+        checks_state:
+          type: string
+          description: "Checks completeness: pending|complete|limited|unsupported"
         goplus_is_honeypot: { type: boolean, nullable: true }
         goplus_is_blacklisted: { type: boolean, nullable: true }
         goplus_cannot_sell_all: { type: boolean, nullable: true }

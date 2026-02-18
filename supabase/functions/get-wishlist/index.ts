@@ -159,6 +159,8 @@ type GoPlusSignals = {
   take_back_ownership: boolean | null;
 };
 
+type ChecksState = "pending" | "complete" | "limited" | "unsupported";
+
 function pct(n: number): string {
   return `${Math.round(n * 1000) / 10}%`;
 }
@@ -253,6 +255,23 @@ function scoreDeductionModel(s: GoPlusSignals): { safety_score: number | null; i
   const finalScore = clampScore(score);
   const isRisk = finalScore < 60 || factors.length > 0;
   return { safety_score: finalScore, is_security_risk: isRisk, risk_factors: factors };
+}
+
+function checksStateFromScoring(signals: GoPlusSignals, scored: { risk_factors: string[] }): ChecksState {
+  if (signals.status === "unsupported") return "unsupported";
+  if (signals.status === "scanning") return "pending";
+  const rf = scored.risk_factors ?? [];
+  if (rf.includes("Unknown Risk (GoPlus missing fields)") || rf.includes("Unknown Risk (GoPlus unavailable)")) return "limited";
+  return "complete";
+}
+
+function normalizeGoPlusStatus(
+  raw: GoPlusSignals["status"],
+  checksState: ChecksState,
+): GoPlusSignals["status"] | "limited" {
+  if (checksState === "pending") return "pending";
+  if (checksState === "limited") return "limited";
+  return raw;
 }
 
 function bestPairForToken(pairs: Pair[], chainId: string, tokenAddress: string): Pair | null {
@@ -665,6 +684,8 @@ Deno.serve(async (req) => {
       take_back_ownership: (go as any).take_back_ownership ?? null,
     };
     const scored = scoreDeductionModel(signals);
+    const checks_state = checksStateFromScoring(signals, scored);
+    const goplus_status = normalizeGoPlusStatus(status, checks_state);
     return {
       token_id: w.token_id,
       chain_id: chainId || (t?.chain_id ?? null),
@@ -682,7 +703,8 @@ Deno.serve(async (req) => {
       price_change_5m: t?.price_change_5m ?? null,
       price_change_1h: t?.price_change_1h ?? null,
       is_surging: t?.price_change_5m !== null && t?.price_change_1h !== null ? t.price_change_5m > t.price_change_1h : false,
-      goplus_status: status,
+      goplus_status,
+      checks_state,
       goplus_is_honeypot: signals.is_honeypot,
       goplus_is_blacklisted: signals.is_blacklisted,
       goplus_cannot_sell_all: signals.cannot_sell_all,
