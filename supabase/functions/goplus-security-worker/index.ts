@@ -56,11 +56,29 @@ async function fetchGoPlusJson(
   let lastText = "";
   for (const doFetch of attempts) {
     const res = await doFetch();
-    if (res.ok) return await res.json();
-    lastText = await res.text().catch(() => "");
-    // If unauthorized, try the next header style
-    if (res.status === 401 || res.status === 403) continue;
-    throw new Error(`GoPlus HTTP ${res.status}: ${lastText}`);
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      lastText = text;
+      // If unauthorized, try the next header style
+      if (res.status === 401 || res.status === 403) continue;
+      throw new Error(`GoPlus HTTP ${res.status}: ${lastText}`);
+    }
+
+    // GoPlus can return HTTP 200 even when auth fails (e.g., code=4012).
+    // In that case, try the next header style.
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`GoPlus non-JSON 200: ${text}`);
+    }
+    const codeRaw = json?.code ?? json?.Code ?? null;
+    const code = typeof codeRaw === "number" ? codeRaw : typeof codeRaw === "string" ? Number.parseInt(codeRaw, 10) : NaN;
+    const msg = typeof json?.message === "string" ? json.message : "";
+    if (code === 1) return json;
+    lastText = text;
+    if (code === 4012 || msg.toLowerCase().includes("signature verification failure")) continue;
+    return json;
   }
 
   throw new Error(`GoPlus unauthorized: ${lastText}`);
@@ -72,9 +90,9 @@ function extractResultForToken(payload: unknown, tokenAddress: string): Record<s
   const obj = payload as Record<string, unknown>;
   const result = obj.result;
   if (result && typeof result === "object") {
-    const lower = tokenAddress.toLowerCase();
     const r = result as Record<string, unknown>;
-    const direct = r[lower] ?? r[tokenAddress] ?? r[tokenAddress.toLowerCase()];
+    // Solana addresses are case-sensitive. Try exact key first, then fall back.
+    const direct = r[tokenAddress] ?? r[tokenAddress.toLowerCase()] ?? r[tokenAddress.toUpperCase()];
     if (direct && typeof direct === "object") return direct as Record<string, unknown>;
   }
   // Some endpoints may return the token object directly.
@@ -233,6 +251,16 @@ Deno.serve(async (req) => {
         }
 
         const payload = await fetchGoPlusJson(url, apiKey);
+        const envelope: any = payload && typeof payload === "object" ? payload : null;
+        const codeRaw = envelope?.code ?? envelope?.Code ?? null;
+        const code = typeof codeRaw === "number" ? codeRaw : typeof codeRaw === "string" ? Number.parseInt(codeRaw, 10) : NaN;
+        const message = typeof envelope?.message === "string" ? envelope.message : "";
+        if (code !== 1) {
+          if (code === 7012 || code === 7013) {
+            throw new Error(`UNSUPPORTED_TOKEN: GOPLUS_CODE_${Number.isFinite(code) ? code : "unknown"}: ${message}`);
+          }
+          throw new Error(`GOPLUS_CODE_${Number.isFinite(code) ? code : "unknown"}: ${message}`);
+        }
         const result = extractResultForToken(payload, tokenAddress) ?? {};
 
         // Extract common fields (best-effort)
@@ -277,7 +305,21 @@ Deno.serve(async (req) => {
           result["take_back_ownership"] ?? result["takeBackOwnership"] ?? result["can_take_back_ownership"],
         );
 
-        const policy = computePolicy({ cannot_sell, is_honeypot, sell_tax, is_blacklisted, cannot_sell_all, buy_tax });
+        // Solana token_security fields are objects with {status:"0"|"1"}.
+        const solStatus = (k: string) => flag((result as any)?.[k]?.status);
+        const solMintable = solStatus("mintable");
+        const solFreezable = solStatus("freezable");
+        const solMetadataMutable = solStatus("metadata_mutable");
+        const solNonTransferable = solStatus("non_transferable");
+
+        const policy = computePolicy({
+          cannot_sell,
+          is_honeypot,
+          sell_tax,
+          is_blacklisted,
+          cannot_sell_all: cannot_sell_all ?? solNonTransferable,
+          buy_tax,
+        });
 
         const up = await supabase
           .from("goplus_token_security_cache")
@@ -295,8 +337,8 @@ Deno.serve(async (req) => {
               sell_tax,
               trust_list,
               is_blacklisted,
-              cannot_sell_all,
-              transfer_pausable,
+              cannot_sell_all: cannot_sell_all ?? solNonTransferable,
+              transfer_pausable: transfer_pausable ?? solFreezable,
               slippage_modifiable,
               external_call,
               owner_change_balance,
@@ -304,8 +346,8 @@ Deno.serve(async (req) => {
               cannot_buy,
               trading_cooldown,
               is_open_source,
-              is_mintable,
-              take_back_ownership,
+              is_mintable: is_mintable ?? solMintable,
+              take_back_ownership: take_back_ownership ?? solMetadataMutable,
               always_deny: policy.always_deny,
               deny_reasons: policy.deny_reasons,
             },
@@ -333,6 +375,7 @@ Deno.serve(async (req) => {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const isUnsupported = msg.startsWith("UNSUPPORTED_CHAIN:");
+        const isUnsupportedToken = msg.startsWith("UNSUPPORTED_TOKEN:");
         if (isUnsupported) {
           // Do not retry unsupported chains endlessly.
           await supabase
@@ -343,6 +386,19 @@ Deno.serve(async (req) => {
               updated_at: new Date().toISOString(),
               last_error: msg,
               next_run_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+            })
+            .eq("chain_id", job.chain_id)
+            .eq("token_address", job.token_address);
+        } else if (isUnsupportedToken) {
+          // Do not retry invalid token addresses endlessly.
+          await supabase
+            .from("token_security_scan_queue")
+            .update({
+              status: "completed",
+              locked_at: null,
+              updated_at: new Date().toISOString(),
+              last_error: msg,
+              next_run_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
             })
             .eq("chain_id", job.chain_id)
             .eq("token_address", job.token_address);

@@ -110,7 +110,7 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 assert isinstance(data, list), "format=min must return JSON array"
 if data:
     x = data[0]
-    for k in ["id", "chain_id", "token_address", "goplus_status", "checks_state", "safety_score", "is_surging"]:
+    for k in ["token_id", "chain_id", "token_address", "goplus_status", "checks_state", "safety_score", "is_surging"]:
         assert k in x, f"missing key: {k}"
     assert "risk_factors" in x and isinstance(x["risk_factors"], list), "risk_factors must be array"
     for k in ["dex_chart_url", "official_website_url", "twitter_url", "telegram_url"]:
@@ -129,6 +129,20 @@ if data:
 print("  ok: get-feed(min) schema + numeric types")
 PY
 rm -rf "${tmpdir}"
+echo
+
+echo "6b) Smoke: repeat exposure toggle (allow_repeat)"
+# First, consume up to one full page (<=20) so those become "seen"
+seen_count="$(curl -sS -H "x-client-id: verify-repeat" "${SUPABASE_URL}/functions/v1/get-feed?limit=20&chains=solana&format=min" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d))')"
+# Second call without allow_repeat should return 0 if token pool <= 20
+after_count="$(curl -sS -H "x-client-id: verify-repeat" "${SUPABASE_URL}/functions/v1/get-feed?limit=20&chains=solana&format=min" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d))')"
+# Third call with allow_repeat should return >0 when we already saw some
+repeat_count="$(curl -sS -H "x-client-id: verify-repeat" "${SUPABASE_URL}/functions/v1/get-feed?limit=20&chains=solana&format=min&allow_repeat=true" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d))')"
+if [[ "${seen_count}" -gt 0 && "${after_count}" -eq 0 && "${repeat_count}" -gt 0 ]]; then
+  echo "  ok: allow_repeat re-enables seen tokens"
+else
+  echo "  warn: allow_repeat toggle check may be inconclusive (seen=${seen_count} after=${after_count} repeat=${repeat_count})"
+fi
 echo
 
 echo "7) Smoke: wishlist capture + ROI (get-wishlist)"

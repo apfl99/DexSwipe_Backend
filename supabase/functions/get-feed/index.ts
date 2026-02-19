@@ -105,10 +105,10 @@ function safetyScore(r: FeedRow): number {
 function isSurging(r: FeedRow): boolean {
   // Velocity/acceleration heuristic using 5m/15m/1h price change (best-effort).
   // Surging when short-term move outpaces longer windows consistently.
-  const p5 = r.price_change_5m;
-  const p1h = r.price_change_1h;
+  const p5 = toNum(r.price_change_5m);
+  const p1h = toNum(r.price_change_1h);
   // Some providers don't return `m15`; fallback to a linear estimate from 1h.
-  const p15 = r.price_change_15m ?? (p1h !== null ? p1h / 4 : null);
+  const p15 = toNum(r.price_change_15m) ?? (p1h !== null ? p1h / 4 : null);
   if (p5 === null || p15 === null || p1h === null) return false;
   if (!Number.isFinite(p5) || !Number.isFinite(p15) || !Number.isFinite(p1h)) return false;
 
@@ -220,10 +220,28 @@ async function fetchGoPlusJson(url: string, apiKey: string | null, timeoutMs: nu
     let lastText = "";
     for (const h of attempts) {
       const res = await fetch(url, { headers: h, signal: controller.signal });
-      if (res.ok) return await res.json();
-      lastText = await res.text().catch(() => "");
-      if (res.status === 401 || res.status === 403) continue;
-      throw new Error(`GoPlus HTTP ${res.status}: ${lastText}`);
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        lastText = text;
+        if (res.status === 401 || res.status === 403) continue;
+        throw new Error(`GoPlus HTTP ${res.status}: ${lastText}`);
+      }
+
+      // GoPlus can return HTTP 200 even when auth fails (e.g., code=4012).
+      // In that case, try the next header style.
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        throw new Error(`GoPlus non-JSON 200: ${text}`);
+      }
+      const codeRaw = json?.code ?? json?.Code ?? null;
+      const code = typeof codeRaw === "number" ? codeRaw : typeof codeRaw === "string" ? Number.parseInt(codeRaw, 10) : NaN;
+      const msg = typeof json?.message === "string" ? json.message : "";
+      if (code === 1) return json;
+      lastText = text;
+      if (code === 4012 || msg.toLowerCase().includes("signature verification failure")) continue;
+      return json;
     }
     throw new Error(`GoPlus unauthorized: ${lastText}`);
   } finally {
@@ -236,8 +254,8 @@ function extractGoPlusResult(payload: unknown, tokenAddress: string): Record<str
   const obj = payload as any;
   const result = obj.result;
   if (result && typeof result === "object") {
-    const lower = tokenAddress.toLowerCase();
-    const direct = result[lower] ?? result[tokenAddress] ?? result[tokenAddress.toLowerCase()];
+    // Solana addresses are case-sensitive. Try exact key first, then fall back.
+    const direct = result[tokenAddress] ?? result[tokenAddress.toLowerCase()] ?? result[tokenAddress.toUpperCase()];
     if (direct && typeof direct === "object") return direct as Record<string, unknown>;
   }
   return obj;
@@ -264,6 +282,7 @@ function safetyScoreFromHybrid(x: {
 type GoPlusSignals = {
   // status
   status: "live" | "cached" | "stale" | "scanning" | "unsupported";
+  provider_error?: string | null;
   // critical
   is_honeypot: boolean | null;
   is_blacklisted: boolean | null;
@@ -314,83 +333,144 @@ function hasAnySignal(s: GoPlusSignals): boolean {
   return vals.some((v) => v !== null && v !== undefined);
 }
 
-function scoreDeductionModel(s: GoPlusSignals): {
+function scoreDeductionModel(input: {
+  // provider
+  go: GoPlusSignals;
+  // quality caches (from RPC)
+  url_is_phishing: boolean | null;
+  url_dapp_risk_level: string | null;
+  rug_is_rugpull_risk: boolean | null;
+  rug_risk_level: string | null;
+  // queue-derived
+  checks_state: ChecksState;
+}): {
   safety_score: number | null;
   is_security_risk: boolean;
   risk_factors: string[];
 } {
-  // Unknown state MUST NOT be 100.
-  if (s.status !== "live" && s.status !== "cached" && s.status !== "stale") {
-    return { safety_score: 50, is_security_risk: true, risk_factors: ["Unknown Risk (GoPlus unavailable)"] };
-  }
-  if (!hasAnySignal(s)) {
-    return { safety_score: 50, is_security_risk: true, risk_factors: ["Unknown Risk (GoPlus missing fields)"] };
-  }
-
+  const go = input.go;
   const factors: string[] = [];
 
+  // Unsupported checks: explicit, not "unknown"
+  if (input.checks_state === "unsupported" || go.status === "unsupported") {
+    return { safety_score: null, is_security_risk: false, risk_factors: ["Checks Unsupported (chain)"] };
+  }
+
+  // Pending checks: explicit, not "unknown"
+  if (input.checks_state === "pending") {
+    // Still allow hard evidence from URL/rugpull caches (if any),
+    // but keep safety_score null until token security checks are complete.
+    if (input.url_is_phishing === true) return { safety_score: null, is_security_risk: true, risk_factors: ["Phishing Site"] };
+    if (input.rug_is_rugpull_risk === true) {
+      const lvl = (input.rug_risk_level ?? "").trim();
+      return { safety_score: null, is_security_risk: true, risk_factors: [lvl ? `Rugpull Risk (${lvl})` : "Rugpull Risk"] };
+    }
+    // UI should render '-' when safety_score is null.
+    return { safety_score: null, is_security_risk: false, risk_factors: ["Checks Pending"] };
+  }
+
+  // URL / rugpull signals (explicit, cross-chain where available)
+  if (input.url_is_phishing === true) factors.push("Phishing Site");
+  if (input.rug_is_rugpull_risk === true) {
+    const lvl = (input.rug_risk_level ?? "").trim();
+    factors.push(lvl ? `Rugpull Risk (${lvl})` : "Rugpull Risk");
+  }
+
+  // Limited checks: explicit reason
+  if (input.checks_state === "limited") {
+    if (typeof go.provider_error === "string" && go.provider_error.trim()) {
+      return { safety_score: null, is_security_risk: false, risk_factors: [go.provider_error.trim()] };
+    }
+    if (factors.length) {
+      // We have some hard signals; keep score conservative but not "unknown"
+      return { safety_score: null, is_security_risk: true, risk_factors: factors };
+    }
+    return { safety_score: null, is_security_risk: false, risk_factors: ["Checks Limited (provider fields missing)"] };
+  }
+
+  // Complete: apply GoPlus deduction model (and keep URL/rug deductions)
+  // If provider fields are unexpectedly empty, do NOT default to 100.
+  if (!hasAnySignal(go) && factors.length === 0) {
+    return { safety_score: null, is_security_risk: false, risk_factors: ["Checks Limited (provider fields missing)"] };
+  }
+
   // Critical => 0
-  if (s.is_honeypot === true) factors.push("Honeypot");
-  if (s.is_blacklisted === true) factors.push("Blacklisted");
-  if (s.cannot_sell_all === true) factors.push("Cannot Sell All");
-  if (typeof s.sell_tax === "number" && s.sell_tax > 0.5) factors.push(`High Sell Tax (${pct(s.sell_tax)})`);
-  if (typeof s.buy_tax === "number" && s.buy_tax > 0.5) factors.push(`High Buy Tax (${pct(s.buy_tax)})`);
-  if (factors.length) return { safety_score: 0, is_security_risk: true, risk_factors: factors };
+  if (go.is_honeypot === true) factors.push("Honeypot");
+  if (go.is_blacklisted === true) factors.push("Blacklisted");
+  if (go.cannot_sell_all === true) factors.push("Cannot Sell All");
+  if (typeof go.sell_tax === "number" && go.sell_tax > 0.5) factors.push(`High Sell Tax (${pct(go.sell_tax)})`);
+  if (typeof go.buy_tax === "number" && go.buy_tax > 0.5) factors.push(`High Buy Tax (${pct(go.buy_tax)})`);
+  if (factors.some((f) => f === "Honeypot" || f === "Blacklisted" || f === "Cannot Sell All" || f.startsWith("High "))) {
+    return { safety_score: 0, is_security_risk: true, risk_factors: factors };
+  }
 
   let score = 100;
 
+  // Penalize dApp risk level (from URL cache) if present.
+  const d = (input.url_dapp_risk_level ?? "").toLowerCase();
+  if (d === "high" || d === "danger") {
+    score -= 40;
+    factors.push("Dapp Risk High");
+  } else if (d === "medium" || d === "warning") {
+    score -= 20;
+    factors.push("Dapp Risk Medium");
+  } else if (d === "low") {
+    score -= 5;
+    factors.push("Dapp Risk Low");
+  }
+
   // High risks (-20 each)
-  if (s.is_proxy === true) {
+  if (go.is_proxy === true) {
     score -= 20;
     factors.push("Proxy Contract");
   }
-  if (s.transfer_pausable === true) {
+  if (go.transfer_pausable === true) {
     score -= 20;
     factors.push("Transfer Pausable");
   }
-  if (s.slippage_modifiable === true) {
+  if (go.slippage_modifiable === true) {
     score -= 20;
     factors.push("Slippage Modifiable");
   }
-  if (s.external_call === true) {
+  if (go.external_call === true) {
     score -= 20;
     factors.push("External Call");
   }
 
   // Medium risks (-10 each)
-  if (s.owner_change_balance === true) {
+  if (go.owner_change_balance === true) {
     score -= 10;
     factors.push("Owner Can Change Balance");
   }
-  if (s.hidden_owner === true) {
+  if (go.hidden_owner === true) {
     score -= 10;
     factors.push("Hidden Owner");
   }
-  if (s.cannot_buy === true) {
+  if (go.cannot_buy === true) {
     score -= 10;
     factors.push("Cannot Buy");
   }
-  if (s.trading_cooldown === true) {
+  if (go.trading_cooldown === true) {
     score -= 10;
     factors.push("Trading Cooldown");
   }
 
   // Low risks (-5 each)
-  if (s.is_open_source === false) {
+  if (go.is_open_source === false) {
     score -= 5;
     factors.push("Not Open Source");
   }
-  if (s.is_mintable === true) {
+  if (go.is_mintable === true) {
     score -= 5;
     factors.push("Mintable");
   }
-  if (s.take_back_ownership === true) {
+  if (go.take_back_ownership === true) {
     score -= 5;
     factors.push("Take Back Ownership");
   }
 
   const finalScore = clampScore(score);
-  const isRisk = finalScore < 60 || factors.length > 0;
+  const isRisk = finalScore < 60 || factors.includes("Phishing Site") || factors.some((f) => f.startsWith("Rugpull Risk"));
   return { safety_score: finalScore, is_security_risk: isRisk, risk_factors: factors };
 }
 
@@ -401,8 +481,9 @@ function checksStateFromScoring(
 ): ChecksState {
   if (signals.status === "unsupported") return "unsupported";
   if (queueStatus === "pending" || queueStatus === "processing") return "pending";
-  const rf = scored.risk_factors ?? [];
-  if (rf.includes("Unknown Risk (GoPlus missing fields)") || rf.includes("Unknown Risk (GoPlus unavailable)")) return "limited";
+  if (signals.status === "scanning") return "pending";
+  if (typeof signals.provider_error === "string" && signals.provider_error.trim()) return "limited";
+  if (!hasAnySignal(signals)) return "limited";
   return "complete";
 }
 
@@ -432,6 +513,7 @@ Deno.serve(async (req) => {
   const minVolume24h = parseNum(u.searchParams.get("min_volume_24h"));
   const minFdv = parseNum(u.searchParams.get("min_fdv"));
   const includeRisky = (u.searchParams.get("include_risky") ?? "").toLowerCase() === "true";
+  const allowRepeat = (u.searchParams.get("allow_repeat") ?? "").toLowerCase() === "true";
   const includeScanningParam = (u.searchParams.get("include_scanning") ?? "").trim();
   const includeScanning = includeScanningParam ? includeScanningParam.toLowerCase() === "true" : true;
 
@@ -451,6 +533,7 @@ Deno.serve(async (req) => {
     p_min_volume_24h: minVolume24h,
     p_min_fdv: minFdv,
     p_include_risky: includeRisky,
+    p_allow_repeat: allowRepeat,
   });
   if (res.error) return json({ error: res.error.message }, { status: 500 });
   const rows = (res.data ?? []) as FeedRow[];
@@ -587,7 +670,8 @@ Deno.serve(async (req) => {
         if (!goByToken.has(k)) need.push(addr);
       }
 
-      const uniqNeed = Array.from(new Set(need.map((a) => a.toLowerCase())));
+      // IMPORTANT: Do not lowercase Solana addresses (case-sensitive).
+      const uniqNeed = Array.from(new Set(need));
       if (uniqNeed.length === 0) return;
 
       const baseUrl =
@@ -599,16 +683,26 @@ Deno.serve(async (req) => {
         const chunk = uniqNeed.slice(i, i + 20);
         const url = `${baseUrl}?contract_addresses=${encodeURIComponent(chunk.join(","))}`;
         const payload = await fetchGoPlusJson(url, apiKey, 1200).catch(() => null);
+        const envelope: any = payload && typeof payload === "object" ? payload : null;
+        const codeRaw = envelope?.code ?? envelope?.Code ?? null;
+        const code = typeof codeRaw === "number" ? codeRaw : typeof codeRaw === "string" ? Number.parseInt(codeRaw, 10) : NaN;
+        const message = typeof envelope?.message === "string" ? envelope.message : null;
+        const ok = code === 1;
         const nowIso = new Date().toISOString();
         const upRows: any[] = [];
 
         for (const a of chunk) {
-          const resObj = payload ? extractGoPlusResult(payload, a) ?? {} : null;
-          if (!resObj) {
-            goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "scanning" });
+          if (!payload) {
+            goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "scanning", provider_error: "Checks Pending" });
+            continue;
+          }
+          if (!ok) {
+            const err = `Checks Limited (GoPlus code ${Number.isFinite(code) ? code : "unknown"}${message ? `: ${message}` : ""})`;
+            goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "stale", provider_error: err });
             continue;
           }
 
+          const resObj = extractGoPlusResult(payload, a) ?? {};
           const cannot_sell = flag((resObj as any)["cannot_sell"] ?? (resObj as any)["cannotSell"]);
           const cannot_sell_all = flag(
             (resObj as any)["cannot_sell_all"] ??
@@ -655,18 +749,25 @@ Deno.serve(async (req) => {
               (resObj as any)["can_take_back_ownership"],
           );
 
+          // Solana token_security fields are objects with {status:"0"|"1"}.
+          const solStatus = (k: string) => flag((resObj as any)?.[k]?.status);
+          const solMintable = solStatus("mintable");
+          const solFreezable = solStatus("freezable");
+          const solMetadataMutable = solStatus("metadata_mutable");
+          const solNonTransferable = solStatus("non_transferable");
+
           goByToken.set(`${chainId}:${a}`.toLowerCase(), {
             status: "live",
             scanned_at: nowIso,
             cannot_sell,
-            cannot_sell_all,
+            cannot_sell_all: cannot_sell_all ?? solNonTransferable,
             is_honeypot,
             is_proxy,
             buy_tax,
             sell_tax,
             trust_list,
             is_blacklisted,
-            transfer_pausable,
+            transfer_pausable: transfer_pausable ?? solFreezable,
             slippage_modifiable,
             external_call,
             owner_change_balance,
@@ -674,8 +775,8 @@ Deno.serve(async (req) => {
             cannot_buy,
             trading_cooldown,
             is_open_source,
-            is_mintable,
-            take_back_ownership,
+            is_mintable: is_mintable ?? solMintable,
+            take_back_ownership: take_back_ownership ?? solMetadataMutable,
           });
 
           upRows.push({
@@ -684,14 +785,14 @@ Deno.serve(async (req) => {
             raw: payload,
             scanned_at: nowIso,
             cannot_sell,
-            cannot_sell_all,
+            cannot_sell_all: cannot_sell_all ?? solNonTransferable,
             is_honeypot,
             is_proxy,
             buy_tax,
             sell_tax,
             trust_list,
             is_blacklisted,
-            transfer_pausable,
+            transfer_pausable: transfer_pausable ?? solFreezable,
             slippage_modifiable,
             external_call,
             owner_change_balance,
@@ -699,8 +800,8 @@ Deno.serve(async (req) => {
             cannot_buy,
             trading_cooldown,
             is_open_source,
-            is_mintable,
-            take_back_ownership,
+            is_mintable: is_mintable ?? solMintable,
+            take_back_ownership: take_back_ownership ?? solMetadataMutable,
           });
         }
 
@@ -768,17 +869,25 @@ Deno.serve(async (req) => {
           is_mintable: go.is_mintable ?? null,
           take_back_ownership: go.take_back_ownership ?? null,
         };
-        const scored = scoreDeductionModel(signals);
         const queueStatus = queueStatusByToken.get(`${r.chain_id}:${r.token_address}`.toLowerCase()) ?? null;
-        const checks_state = checksStateFromScoring(signals, scored, queueStatus);
+        const checks_state = checksStateFromScoring(signals, { risk_factors: [] }, queueStatus);
+        const scored = scoreDeductionModel({
+          go: signals,
+          url_is_phishing: r.url_is_phishing ?? null,
+          url_dapp_risk_level: r.url_dapp_risk_level ?? null,
+          rug_is_rugpull_risk: r.rug_is_rugpull_risk ?? null,
+          rug_risk_level: r.rug_risk_level ?? null,
+          checks_state,
+        });
         const goplus_status = normalizeGoPlusStatus(status, checks_state);
+        const goplus_verified = checks_state === "complete";
         const buys_24h = typeof r.buys_24h === "number" ? r.buys_24h : null;
         const sells_24h = typeof r.sells_24h === "number" ? r.sells_24h : null;
         const txns_24h =
           buys_24h !== null && sells_24h !== null ? buys_24h + sells_24h : buys_24h !== null ? buys_24h : sells_24h;
 
         return {
-          id: r.token_id,
+          token_id: r.token_id,
           chain_id: r.chain_id,
           token_address: r.token_address,
           symbol: dex.symbol ?? r.symbol,
@@ -800,12 +909,12 @@ Deno.serve(async (req) => {
           risk_factors: scored.risk_factors,
           goplus_status,
           checks_state,
-          goplus_is_honeypot: signals.is_honeypot,
-          goplus_cannot_sell_all: signals.cannot_sell_all,
-          goplus_buy_tax: signals.buy_tax,
-          goplus_sell_tax: signals.sell_tax,
-          goplus_trust_list: go.trust_list ?? null,
-          goplus_is_blacklisted: signals.is_blacklisted,
+          goplus_is_honeypot: goplus_verified ? signals.is_honeypot : null,
+          goplus_cannot_sell_all: goplus_verified ? signals.cannot_sell_all : null,
+          goplus_buy_tax: goplus_verified ? signals.buy_tax : null,
+          goplus_sell_tax: goplus_verified ? signals.sell_tax : null,
+          goplus_trust_list: goplus_verified ? (go.trust_list ?? null) : null,
+          goplus_is_blacklisted: goplus_verified ? signals.is_blacklisted : null,
         };
       })
       .filter(Boolean);
@@ -845,10 +954,18 @@ Deno.serve(async (req) => {
         is_mintable: (go as any).is_mintable ?? null,
         take_back_ownership: (go as any).take_back_ownership ?? null,
       };
-      const scored = scoreDeductionModel(signals);
       const queueStatus = queueStatusByToken.get(`${r.chain_id}:${r.token_address}`.toLowerCase()) ?? null;
-      const checks_state = checksStateFromScoring(signals, scored, queueStatus);
+      const checks_state = checksStateFromScoring(signals, { risk_factors: [] }, queueStatus);
+      const scored = scoreDeductionModel({
+        go: signals,
+        url_is_phishing: r.url_is_phishing ?? null,
+        url_dapp_risk_level: r.url_dapp_risk_level ?? null,
+        rug_is_rugpull_risk: r.rug_is_rugpull_risk ?? null,
+        rug_risk_level: r.rug_risk_level ?? null,
+        checks_state,
+      });
       const goplus_status = normalizeGoPlusStatus(status, checks_state);
+      const goplus_verified = checks_state === "complete";
       const buys_24h = typeof r.buys_24h === "number" ? r.buys_24h : null;
       const sells_24h = typeof r.sells_24h === "number" ? r.sells_24h : null;
       const txns_24h =
@@ -883,24 +1000,24 @@ Deno.serve(async (req) => {
         risk_factors: scored.risk_factors,
         goplus_status,
         checks_state,
-        goplus_scanned_at: (go as any).scanned_at ?? null,
-        goplus_is_honeypot: signals.is_honeypot,
-        goplus_is_blacklisted: signals.is_blacklisted,
-        goplus_cannot_sell_all: signals.cannot_sell_all,
-        goplus_buy_tax: signals.buy_tax,
-        goplus_sell_tax: signals.sell_tax,
-        goplus_is_proxy: signals.is_proxy,
-        goplus_transfer_pausable: signals.transfer_pausable,
-        goplus_slippage_modifiable: signals.slippage_modifiable,
-        goplus_external_call: signals.external_call,
-        goplus_owner_change_balance: signals.owner_change_balance,
-        goplus_hidden_owner: signals.hidden_owner,
-        goplus_cannot_buy: signals.cannot_buy,
-        goplus_trading_cooldown: signals.trading_cooldown,
-        goplus_is_open_source: signals.is_open_source,
-        goplus_is_mintable: signals.is_mintable,
-        goplus_take_back_ownership: signals.take_back_ownership,
-        goplus_trust_list: (go as any).trust_list ?? null,
+        goplus_scanned_at: goplus_verified ? ((go as any).scanned_at ?? null) : null,
+        goplus_is_honeypot: goplus_verified ? signals.is_honeypot : null,
+        goplus_is_blacklisted: goplus_verified ? signals.is_blacklisted : null,
+        goplus_cannot_sell_all: goplus_verified ? signals.cannot_sell_all : null,
+        goplus_buy_tax: goplus_verified ? signals.buy_tax : null,
+        goplus_sell_tax: goplus_verified ? signals.sell_tax : null,
+        goplus_is_proxy: goplus_verified ? signals.is_proxy : null,
+        goplus_transfer_pausable: goplus_verified ? signals.transfer_pausable : null,
+        goplus_slippage_modifiable: goplus_verified ? signals.slippage_modifiable : null,
+        goplus_external_call: goplus_verified ? signals.external_call : null,
+        goplus_owner_change_balance: goplus_verified ? signals.owner_change_balance : null,
+        goplus_hidden_owner: goplus_verified ? signals.hidden_owner : null,
+        goplus_cannot_buy: goplus_verified ? signals.cannot_buy : null,
+        goplus_trading_cooldown: goplus_verified ? signals.trading_cooldown : null,
+        goplus_is_open_source: goplus_verified ? signals.is_open_source : null,
+        goplus_is_mintable: goplus_verified ? signals.is_mintable : null,
+        goplus_take_back_ownership: goplus_verified ? signals.take_back_ownership : null,
+        goplus_trust_list: goplus_verified ? ((go as any).trust_list ?? null) : null,
         updated_at: r.updated_at,
         urls: {
           official_website: dex.official_website_url ?? null,

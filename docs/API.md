@@ -22,8 +22,9 @@
   - `min_volume_24h`: 24h 거래량 최소값(USD)
   - `min_fdv`: FDV 최소값(USD)
   - `include_risky`: `true`면 피싱/러그 위험 자산도 포함(기본 false)
+  - `allow_repeat`: `true`면 이미 본 토큰(seen_tokens)을 다시 피드에 포함(기본 false, 토글용)
   - `include_scanning`: `true|false` (기본 `true`)  
-    - GoPlus 보안 데이터가 아직 없거나 호출 실패 시 `goplus_status=scanning|unsupported`로 내려옵니다.
+    - Checks가 아직 완료되지 않으면 `checks_state=pending|limited`로 내려올 수 있습니다(체인 미지원은 `unsupported`).
 
 - **리스크 필터(기본 동작)**
   - `security.always_deny=true` 이면 제외
@@ -46,6 +47,11 @@ curl -sS -H "x-client-id: device-abc" \
 ```
 
 `format=min`일 때는 응답이 **flat JSON array**이고, 다음 페이지 커서는 응답 헤더 `x-next-cursor`로 내려옵니다.
+`format=full`일 때는 응답이 다음 형태입니다.
+
+```json
+{ "tokens": [ /* FeedItemFull[] */ ] }
+```
 응답은 DexScreener(가격) + GoPlus(보안)를 병렬로 합친 “완전체”를 목표로 하며, 주요 필드:
 - DexScreener: `price_usd`, `volume_24h`, `liquidity_usd`, `fdv`, `price_change_5m`, `price_change_1h`
 - GoPlus: `goplus_is_honeypot`, `goplus_buy_tax`, `goplus_sell_tax`, `goplus_trust_list`, `goplus_is_blacklisted`, `goplus_status`
@@ -61,6 +67,26 @@ Checks(완성도):
   - `complete`: 검사 데이터 충분(상태 안정)
   - `limited`: 점수는 산출했지만 상세 체크 일부 누락
   - `unsupported`: 체인 미지원
+스캔 대상:
+- `tokens` 테이블에 저장된(=수집 품질 필터를 통과한) 토큰은 **전부** 보안/품질 스캔 큐에 enqueue 됩니다. (유동성/거래량 기반의 별도 제한 없음)
+Score 표기:
+- GoPlus 검증이 **완료(complete)** 되지 않은 상태(`pending|limited|unsupported`)에서는 `safety_score`는 **null**로 내려오며,
+  프론트에서는 **`"-"`(미표기)** 로 렌더링하는 것을 권장합니다.
+  - 사유는 `risk_factors`로 내려옵니다. (예: `["Checks Pending"]`, `["Checks Limited (provider fields missing)"]`)
+  - 동일하게 `goplus_*` 상세 플래그들도 **검증 완료 전에는 전부 null**로 내려옵니다. (프론트는 null을 “미확정/미검증”으로 해석)
+`risk_factors`가 “왜 limited인지”를 명확히 설명하도록 설계되어 있으며, 대표 예시는 아래와 같습니다.
+- `Checks Pending`
+- `Checks Limited (GoPlus code 7013: Address format error!)`
+- `Checks Limited (GoPlus code 7012: Not fungible spl token address)`
+
+GoPlus(체인별 신호 매핑):
+- EVM(Base 등): `is_honeypot`, `is_blacklisted`, `cannot_sell_all`, `buy_tax`, `sell_tax`, `is_proxy` 등 EVM 표준 필드를 직접 사용합니다.
+- Solana: GoPlus Solana Token Security 응답의 `status` 기반 신호를 감점제에 매핑합니다.
+  - Solana 주소는 **대소문자 민감(case-sensitive)** 이므로, 백엔드는 token_address를 소문자 변환하지 않습니다.
+  - `mintable.status=1` → `Mintable`(저위험 -5)
+  - `freezable.status=1` → `Transfer Pausable`(고위험 -20)
+  - `metadata_mutable.status=1` → `Take Back Ownership`(저위험 -5)
+  - `non_transferable.status=1` → `Cannot Sell All`(치명 - 즉시 0점)
 프론트 렌더링 권장(혼선 방지):
 - **표시 우선순위**: `checks_state`를 1순위로 사용하고, `goplus_status`는 디버그/보조 텍스트로만 사용합니다.
 - **라벨 매핑(예시)**:
@@ -105,6 +131,7 @@ curl -sS -H "x-client-id: device-abc" \
   - 상세 사유는 `risk_factors: string[]`로 내려옵니다.
   - URL 분리 필드(`dex_chart_url`, `official_website_url`, `twitter_url`, `telegram_url`) 및 `urls` 객체가 함께 내려옵니다.
   - `checks_state`를 함께 내려 프론트에서 “Checks LIMITED/COMPLETE” 등을 안정적으로 표시할 수 있습니다.
+  - `risk_factors`에 `Checks Limited (GoPlus code ...: ...)` 형태의 구체 사유가 포함될 수 있습니다(예: 주소 포맷 오류, 비지원 토큰 타입 등).
 
 - **Headers**
   - `x-client-id`: 필수

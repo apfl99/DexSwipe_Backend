@@ -72,9 +72,14 @@ paths:
           schema:
             type: boolean
         - in: query
+          name: allow_repeat
+          description: If true, do not exclude already seen tokens (seen_tokens anti-join bypass). Default false.
+          schema:
+            type: boolean
+        - in: query
           name: include_scanning
           description: |
-            If true, include tokens whose GoPlus status is `scanning`/`unsupported`.
+            If true, include tokens whose checks are not complete yet (e.g. `pending`/`limited`) or `unsupported`.
             Default: true (recommended for fresh DB / cold start).
           schema:
             type: boolean
@@ -267,11 +272,14 @@ components:
         is_security_risk: { type: boolean }
         risk_factors:
           type: array
+          description: "Human-readable reasons for safety_score/checks_state. May include explicit provider notes like 'Checks Limited (GoPlus code 7013: Address format error!)'."
           items: { type: string }
         safety_score:
           type: integer
           minimum: 0
           maximum: 100
+          nullable: true
+          description: "Null when checks are not complete (checks_state=pending|limited|unsupported). UI should render '-' for null."
         updated_at: { type: string, format: date-time }
         goplus_status:
           type: string
@@ -308,9 +316,9 @@ components:
             telegram: { type: string, nullable: true }
     FeedItemMin:
       type: object
-      required: [id, chain_id, token_address, is_security_risk, safety_score, is_surging, goplus_status]
+      required: [token_id, chain_id, token_address, is_security_risk, safety_score, is_surging, goplus_status, checks_state, risk_factors]
       properties:
-        id: { type: string }
+        token_id: { type: string, description: "Canonical token id: <chain_id>:<token_address>" }
         chain_id: { type: string }
         token_address: { type: string }
         logo_url: { type: string, nullable: true }
@@ -329,11 +337,14 @@ components:
         is_security_risk: { type: boolean }
         risk_factors:
           type: array
+          description: "Human-readable reasons for safety_score/checks_state. May include explicit provider notes like 'Checks Limited (GoPlus code 7013: Address format error!)'."
           items: { type: string }
         safety_score:
           type: integer
           minimum: 0
           maximum: 100
+          nullable: true
+          description: "Null when checks are not complete (checks_state=pending|limited|unsupported). UI should render '-' for null."
         is_surging: { type: boolean }
         goplus_status:
           type: string
@@ -371,9 +382,12 @@ components:
           type: integer
           minimum: 0
           maximum: 100
+          nullable: true
+          description: "Null when checks are not complete (checks_state=pending|limited|unsupported). UI should render '-' for null."
         is_security_risk: { type: boolean }
         risk_factors:
           type: array
+          description: "Human-readable reasons for safety_score/checks_state. May include explicit provider notes like 'Checks Limited (GoPlus code 7013: Address format error!)'."
           items: { type: string }
         updated_at: { type: string, format: date-time }
         goplus_status:

@@ -1,3 +1,4 @@
+/// <reference path="../_shared/tsserver_shims.d.ts" />
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { fetchJsonWithRetry } from "../_shared/dexscreener.ts";
@@ -115,18 +116,6 @@ Deno.serve(async (req) => {
     return json({ error: "missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" }, { status: 500 });
   }
   const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
-
-  // Gate GoPlus scans by market quality (reduce CU usage; increase data quality).
-  const scanMinLiquidityUsd = (() => {
-    const v = Deno.env.get("SECURITY_ENQUEUE_MIN_LIQUIDITY_USD") ?? "5000";
-    const n = Number.parseFloat(v);
-    return Number.isFinite(n) && n >= 0 ? n : 5000;
-  })();
-  const scanMinVolume24h = (() => {
-    const v = Deno.env.get("SECURITY_ENQUEUE_MIN_VOLUME_24H") ?? "10000";
-    const n = Number.parseFloat(v);
-    return Number.isFinite(n) && n >= 0 ? n : 10000;
-  })();
 
   // Hype filter: keep DB lean by only persisting tokens meeting quality threshold.
   const hypeMinLiquidityUsd = (() => {
@@ -267,28 +256,17 @@ Deno.serve(async (req) => {
                 { onConflict: "chain_id,token_address" },
               );
               if (tokensUp.error) throw new Error(`tokens upsert failed: ${tokensUp.error.message}`);
-            }
 
-            // Enqueue GoPlus scan only for tokens passing quality gate.
-            const liq = liquidity_usd ?? 0;
-            const vol = volume_24h ?? 0;
-            if (supportedSecurityChains.has(chain) && liq >= scanMinLiquidityUsd && vol >= scanMinVolume24h) {
-              await supabase
-                .from("token_security_scan_queue")
-                .upsert(
-                  { chain_id: chain, token_address: it.token },
-                  { onConflict: "chain_id,token_address", ignoreDuplicates: true },
-                );
-            }
-
-            // Enqueue GoPlus quality scans (URL phishing/dapp + EVM rugpull) for same gated tokens.
-            if (liq >= scanMinLiquidityUsd && vol >= scanMinVolume24h) {
+              // Enqueue checks for ALL persisted tokens (no liquidity/volume gate).
+              // Security scans require chain_mappings support; quality scans are best-effort.
+              if (supportedSecurityChains.has(chain)) {
+                await supabase
+                  .from("token_security_scan_queue")
+                  .upsert({ chain_id: chain, token_address: it.token }, { onConflict: "chain_id,token_address", ignoreDuplicates: true });
+              }
               await supabase
                 .from("token_quality_scan_queue")
-                .upsert(
-                  { chain_id: chain, token_address: it.token },
-                  { onConflict: "chain_id,token_address", ignoreDuplicates: true },
-                );
+                .upsert({ chain_id: chain, token_address: it.token }, { onConflict: "chain_id,token_address", ignoreDuplicates: true });
             }
 
             processed.push({ chain_id: chain, token_address: it.token, ok: true });
