@@ -61,6 +61,9 @@ curl -sS -H "x-client-id: device-abc" \
 - DexScreener: `price_usd`, `volume_24h`, `liquidity_usd`, `fdv`, `price_change_5m`, `price_change_1h`
 - GoPlus: `goplus_is_honeypot`, `goplus_buy_tax`, `goplus_sell_tax`, `goplus_trust_list`, `goplus_is_blacklisted`, `goplus_status`
 - Intelligence: `safety_score(0~100)`, `is_surging`
+이미지(로고):
+- `logo_url`은 DexScreener가 아이콘을 제공하지 않는 토큰의 경우 **null**일 수 있습니다. (백엔드에서는 `tokens/v1`의 `info.imageUrl` + `token-profiles`의 `icon`을 best-effort로 사용)
+- 프론트에서는 `logo_url == null`이면 **체인 아이콘/기본 placeholder**로 fallback 렌더링을 권장합니다.
 URL 분리:
 - `dex_chart_url`: DexScreener 차트/스왑 링크(`pair.url`)
 - `official_website_url`: 공식 웹사이트(`info.websites[0].url`, 없으면 null)

@@ -251,7 +251,10 @@ components:
           type: string
         name: { type: string, nullable: true }
         symbol: { type: string, nullable: true }
-        logo_url: { type: string, nullable: true }
+        logo_url:
+          type: string
+          nullable: true
+          description: "May be null when provider does not supply an icon. UI should fallback to a placeholder/chain icon."
         website_url: { type: string, nullable: true }
         official_website_url: { type: string, nullable: true }
         dex_chart_url: { type: string, nullable: true }
@@ -321,7 +324,10 @@ components:
         token_id: { type: string, description: "Canonical token id: <chain_id>:<token_address>" }
         chain_id: { type: string }
         token_address: { type: string }
-        logo_url: { type: string, nullable: true }
+        logo_url:
+          type: string
+          nullable: true
+          description: "May be null when provider does not supply an icon. UI should fallback to a placeholder/chain icon."
         symbol: { type: string, nullable: true }
         official_website_url: { type: string, nullable: true }
         dex_chart_url: { type: string, nullable: true }
@@ -366,7 +372,10 @@ components:
         chain_id: { type: string }
         token_address: { type: string }
         symbol: { type: string, nullable: true }
-        logo_url: { type: string, nullable: true }
+        logo_url:
+          type: string
+          nullable: true
+          description: "May be null when provider does not supply an icon. UI should fallback to a placeholder/chain icon."
         official_website_url: { type: string, nullable: true }
         dex_chart_url: { type: string, nullable: true }
         twitter_url: { type: string, nullable: true }

@@ -24,6 +24,13 @@ type Pair = Record<string, unknown> & {
   };
 };
 
+type TokenProfile = Record<string, unknown> & {
+  chainId?: string;
+  tokenAddress?: string;
+  icon?: string;
+  imageUrl?: string;
+};
+
 // Intersection Rule (DexScreener ∩ GoPlus): only persist allowlisted chains.
 const ALLOWED_CHAINS = new Set([
   "solana",
@@ -35,6 +42,8 @@ const ALLOWED_CHAINS = new Set([
   "avalanche",
   "tron",
 ]);
+
+const PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1";
 
 function json(body: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(body), {
@@ -87,6 +96,11 @@ function webp(url: string | null): string | null {
   // Best-effort: force webp when the CDN supports it.
   if (url.includes("format=auto")) return url.replace("format=auto", "format=webp");
   return url;
+}
+
+function profileKey(chainId: string, tokenAddress: string): string {
+  // Solana is case-sensitive; others treated case-insensitive for matching purposes.
+  return chainId === "solana" ? `${chainId}:${tokenAddress}` : `${chainId}:${tokenAddress.toLowerCase()}`;
 }
 
 function websiteUrl(pair: Pair): string | null {
@@ -145,6 +159,26 @@ Deno.serve(async (req) => {
   const supportedSecurityChains = new Set<string>(
     !supportedChainsRes.error ? (supportedChainsRes.data ?? []).map((r: any) => r.dexscreener_chain_id) : [],
   );
+
+  // DexScreener token-profiles feed can contain icons even when tokens/v1 pair lacks info.imageUrl.
+  const profileIconByToken = new Map<string, string>();
+  try {
+    const payload = await fetchJsonWithRetry(PROFILES_URL, { maxAttempts: 2, timeoutMs: 12_000 });
+    const arr = Array.isArray(payload) ? (payload as TokenProfile[]) : [];
+    for (const p of arr) {
+      const chainId = typeof p.chainId === "string" ? p.chainId : "";
+      const addr = typeof p.tokenAddress === "string" ? p.tokenAddress : "";
+      if (!chainId || !addr) continue;
+      if (!ALLOWED_CHAINS.has(chainId)) continue;
+      const icon = typeof p.icon === "string" && p.icon.trim() ? p.icon.trim() : null;
+      const img = typeof p.imageUrl === "string" && p.imageUrl.trim() ? p.imageUrl.trim() : null;
+      const u = icon ?? img;
+      if (!u) continue;
+      profileIconByToken.set(profileKey(chainId, addr), u);
+    }
+  } catch {
+    // ignore (best-effort)
+  }
 
   const processed: Array<{ chain_id: string; token_address: string; ok: boolean; error?: string }> = [];
   let total = 0;
@@ -253,6 +287,16 @@ Deno.serve(async (req) => {
             // Apply hype filter before persisting into the lean `tokens` table.
             const liqForHype = liquidity_usd ?? 0;
             if (liqForHype >= hypeMinLiquidityUsd && txns_1h > hypeMinTxns1h) {
+              const profileIcon = profileIconByToken.get(profileKey(chain, it.token)) ?? null;
+              const baseAddr = typeof best.baseToken?.address === "string" ? best.baseToken.address : "";
+              const quoteAddr = typeof best.quoteToken?.address === "string" ? best.quoteToken.address : "";
+              const isBase =
+                chain === "solana" ? baseAddr === it.token : baseAddr.toLowerCase() === it.token.toLowerCase();
+              const isQuote =
+                chain === "solana" ? quoteAddr === it.token : quoteAddr.toLowerCase() === it.token.toLowerCase();
+              const meta = isBase ? best.baseToken : isQuote ? best.quoteToken : best.baseToken;
+              // `info.imageUrl` can be pair/base-token oriented; only use it when our token is baseToken.
+              const pairImage = isBase ? ((best.info as any)?.imageUrl ?? null) : null;
               const official = websiteUrl(best);
               const chart = dexChartUrl(best);
               const twitter = socialUrl(best, "twitter");
@@ -262,9 +306,9 @@ Deno.serve(async (req) => {
                   token_id: tokenId,
                   chain_id: chain,
                   token_address: it.token,
-                  name: (best.baseToken as any)?.name ?? null,
-                  symbol: (best.baseToken as any)?.symbol ?? null,
-                  logo_url: webp((best.info as any)?.imageUrl ?? null),
+                  name: (meta as any)?.name ?? null,
+                  symbol: (meta as any)?.symbol ?? null,
+                  logo_url: webp(pairImage ?? profileIcon),
                   // Backward compatibility: website_url == official website (nullable)
                   website_url: official,
                   official_website_url: official,
