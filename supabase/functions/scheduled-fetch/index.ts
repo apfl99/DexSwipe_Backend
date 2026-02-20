@@ -26,11 +26,24 @@ function json(body: unknown, init?: ResponseInit) {
 const PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1";
 const SEARCH_URL = "https://api.dexscreener.com/latest/dex/search";
 
-const ALWAYS_CHAINS = ["solana", "base"];
-const ROTATING_CHAINS = ["sui", "tron"] as const;
+// Intersection Rule (DexScreener ∩ GoPlus):
+// Only allow chains where security checks are supported.
+const ALLOWED_CHAINS = [
+  "solana",
+  "base",
+  "bsc",
+  "ethereum",
+  "arbitrum",
+  "polygon",
+  "avalanche",
+  "tron",
+] as const;
+
+const ALWAYS_CHAINS = ["solana", "base"] as const;
+const ROTATING_CHAINS = ["ethereum", "bsc", "arbitrum", "polygon", "avalanche", "tron"] as const;
 
 function decideTargets(now: Date): { mode: "rotate"; chains: string[]; rotating: string } {
-  // Always fetch Solana/Base, and rotate Sui/Tron 1:1 per run.
+  // Always fetch Solana/Base, and rotate other allowlisted chains per run.
   // Deterministic: based on epoch 5-minute bucket.
   const bucket = Math.floor(now.getTime() / (5 * 60 * 1000));
   const rotating = ROTATING_CHAINS[bucket % ROTATING_CHAINS.length];
@@ -38,12 +51,28 @@ function decideTargets(now: Date): { mode: "rotate"; chains: string[]; rotating:
 }
 
 async function fetchRotatingCandidates(rotating: string): Promise<Array<{ chain_id: string; token_address: string }>> {
-  // DexScreener global latest feeds don't reliably include Sui/Tron.
+  // DexScreener global latest feeds may not reliably include all chains.
   // For rotating chains we use the search endpoint and filter by chainId.
-  const tryQueries =
-    rotating === "tron"
-      ? ["tron", "usdt"] // fallback query known to surface tron pairs
-      : [rotating]; // sui
+  const tryQueries = (() => {
+    // Best-effort queries to surface each chain in DexScreener search.
+    // We still filter by `chainId === rotating`, so cross-chain noise is ok.
+    switch (rotating) {
+      case "tron":
+        return ["usdt", "tron", "trx"];
+      case "avalanche":
+        return ["avax", "avalanche"];
+      case "arbitrum":
+        return ["arbitrum", "arb"];
+      case "ethereum":
+        return ["ethereum", "eth"];
+      case "bsc":
+        return ["bsc", "bnb"];
+      case "polygon":
+        return ["polygon", "matic"];
+      default:
+        return [rotating];
+    }
+  })();
 
   for (const q of tryQueries) {
     const payload = (await fetchJsonWithRetry(`${SEARCH_URL}?q=${encodeURIComponent(q)}`, {
@@ -78,7 +107,7 @@ Deno.serve(async (req) => {
 
     const now = new Date();
     const { chains, rotating } =
-      forced === "sui" || forced === "tron"
+      (ALLOWED_CHAINS as readonly string[]).includes(forced) && (ROTATING_CHAINS as readonly string[]).includes(forced)
         ? { chains: [...ALWAYS_CHAINS, forced], rotating: forced }
         : decideTargets(now);
 
@@ -99,9 +128,10 @@ Deno.serve(async (req) => {
       token_address: string;
     }>;
 
-    // Always-chains: from profiles feed.
-    const allowedAlways = new Set(ALWAYS_CHAINS);
-    const alwaysRows = profileRows.filter((r) => allowedAlways.has(r.chain_id));
+    // Always-chains: from profiles feed (filtered by allowlist).
+    const allowedAlways = new Set<string>(ALWAYS_CHAINS as unknown as string[]);
+    const allowedAll = new Set<string>(ALLOWED_CHAINS as unknown as string[]);
+    const alwaysRows = profileRows.filter((r) => allowedAlways.has(r.chain_id) && allowedAll.has(r.chain_id));
 
     // Rotating chain: from search feed (best-effort).
     const rotatingRows = await fetchRotatingCandidates(rotating);
@@ -109,7 +139,7 @@ Deno.serve(async (req) => {
     const rows = [...alwaysRows, ...rotatingRows];
 
     // Cap per chain to keep queue/worker fast on free-tier.
-    const allowed = new Set(chains);
+    const allowed = new Set(chains.filter((c) => allowedAll.has(c)));
     const capPerChain = 40;
     const perChainCounts = new Map<string, number>();
     const dedup = new Map<string, { chain_id: string; token_address: string }>();

@@ -24,6 +24,18 @@ type Pair = Record<string, unknown> & {
   };
 };
 
+// Intersection Rule (DexScreener ∩ GoPlus): only persist allowlisted chains.
+const ALLOWED_CHAINS = new Set([
+  "solana",
+  "base",
+  "bsc",
+  "ethereum",
+  "arbitrum",
+  "polygon",
+  "avalanche",
+  "tron",
+]);
+
 function json(body: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(body), {
     headers: { "Content-Type": "application/json; charset=utf-8" },
@@ -152,6 +164,26 @@ Deno.serve(async (req) => {
     }
 
     for (const [chain, items] of byChain.entries()) {
+      if (!ALLOWED_CHAINS.has(chain)) {
+        // Drop non-intersection chains early (do not persist, do not enqueue security).
+        for (const it of items) {
+          await supabase
+            .from("dexscreener_market_update_queue")
+            .update({
+              status: "completed",
+              locked_at: null,
+              updated_at: new Date().toISOString(),
+              last_error: "chain_not_allowed",
+              last_fetched_at: new Date().toISOString(),
+              next_run_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            })
+            .eq("chain_id", chain)
+            .eq("token_address", it.token);
+          processed.push({ chain_id: chain, token_address: it.token, ok: true });
+        }
+        continue;
+      }
+
       for (let i = 0; i < items.length; i += 30) {
         const chunk = items.slice(i, i + 30);
         total += chunk.length;

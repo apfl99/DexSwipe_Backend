@@ -51,7 +51,7 @@ paths:
             format: date-time
         - in: query
           name: chains
-          description: Comma-separated chain ids (e.g. "solana,base"). Supported: solana, base, sui, tron.
+          description: Comma-separated chain ids (e.g. "solana,base"). Supported (Intersection Rule): solana, base, bsc, ethereum, arbitrum, polygon, avalanche, tron.
           schema:
             type: string
         - in: query

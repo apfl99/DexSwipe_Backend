@@ -627,6 +627,12 @@ Deno.serve(async (req) => {
             continue;
           }
           if (!ok) {
+            const msg = (message ?? "").toLowerCase();
+            const isUnsupported = msg.includes("unsupported") || msg.includes("not support");
+            if (isUnsupported) {
+              goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "unsupported", provider_error: "Checks Unsupported (GoPlus)" });
+              continue;
+            }
             const err = `Checks Limited (GoPlus code ${Number.isFinite(code) ? code : "unknown"}${message ? `: ${message}` : ""})`;
             goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "stale", provider_error: err });
             continue;

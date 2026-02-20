@@ -81,8 +81,24 @@ echo -n "  market_update_queue(base): "
 curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.base" \
   "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
 echo
-echo -n "  market_update_queue(sui): "
-curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.sui" \
+echo -n "  market_update_queue(bsc): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.bsc" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
+echo -n "  market_update_queue(eth): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.ethereum" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
+echo -n "  market_update_queue(arb): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.arbitrum" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
+echo -n "  market_update_queue(poly): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.polygon" \
+  "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
+echo
+echo -n "  market_update_queue(avax): "
+curl -sS -G "${authH[@]}" --data-urlencode "select=count" --data-urlencode "chain_id=eq.avalanche" \
   "${SUPABASE_URL}/rest/v1/dexscreener_market_update_queue"
 echo
 echo -n "  market_update_queue(tron): "
@@ -94,6 +110,21 @@ echo -n "  edge_function_heartbeats: "
 curl -sS -G "${authH[@]}" --data-urlencode "select=count" \
   "${SUPABASE_URL}/rest/v1/edge_function_heartbeats"
 echo
+echo
+
+echo "5b) Assert non-allowlisted chains cannot enter queues"
+python3 - <<'PY'
+import os, urllib.parse, urllib.request, json, sys
+SUPABASE_URL=os.environ["SUPABASE_URL"].rstrip("/")
+KEY=os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+url=f"{SUPABASE_URL}/rest/v1/dexscreener_market_update_queue?select=chain_id"
+req=urllib.request.Request(url, headers={"apikey":KEY,"Authorization":f"Bearer {KEY}"})
+data=json.loads(urllib.request.urlopen(req, timeout=20).read().decode("utf-8"))
+allow=set(["solana","base","bsc","ethereum","arbitrum","polygon","avalanche","tron"])
+bad=sorted({r.get("chain_id") for r in data if isinstance(r,dict)}-allow)
+assert not bad, f"found non-allowlisted chains in market_update_queue: {bad}"
+print("  ok: market_update_queue allowlist enforced")
+PY
 echo
 
 echo "6) Smoke: call get-feed format=min (requires x-client-id)"

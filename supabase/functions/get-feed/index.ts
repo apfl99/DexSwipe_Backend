@@ -21,6 +21,18 @@ function parseChains(param: string | null): string[] | null {
   return parts.length ? parts : null;
 }
 
+// Intersection Rule (DexScreener ∩ GoPlus): only expose allowlisted chains in feed.
+const ALLOWED_CHAINS = new Set([
+  "solana",
+  "base",
+  "bsc",
+  "ethereum",
+  "arbitrum",
+  "polygon",
+  "avalanche",
+  "tron",
+]);
+
 function parseNum(param: string | null): number | null {
   if (!param) return null;
   const n = Number.parseFloat(param);
@@ -508,7 +520,13 @@ Deno.serve(async (req) => {
   // Hybrid realtime merge is expensive; cap hard to keep p95 under ~1.5s.
   const limit = Math.min(Math.max(Number.parseInt(u.searchParams.get("limit") ?? "20", 10) || 20, 1), 20);
   const cursor = parseCursor(u.searchParams.get("cursor"));
-  const chains = parseChains(u.searchParams.get("chains"));
+  const chainsRaw = u.searchParams.get("chains");
+  const chainsParsed = parseChains(chainsRaw);
+  const chains = chainsParsed ? chainsParsed.filter((c) => ALLOWED_CHAINS.has(c)) : null;
+  // If the client explicitly requested chains but none are in the intersection allowlist, return empty.
+  if (chainsRaw && (!chains || chains.length === 0)) {
+    return format === "min" ? jsonWithHeaders([], { "x-next-cursor": "" }) : json({ tokens: [], limit, cursor, next_cursor: null });
+  }
   const minLiquidityUsd = parseNum(u.searchParams.get("min_liquidity_usd"));
   const minVolume24h = parseNum(u.searchParams.get("min_volume_24h"));
   const minFdv = parseNum(u.searchParams.get("min_fdv"));
@@ -697,6 +715,12 @@ Deno.serve(async (req) => {
             continue;
           }
           if (!ok) {
+            const msg = (message ?? "").toLowerCase();
+            const isUnsupported = msg.includes("unsupported") || msg.includes("not support");
+            if (isUnsupported) {
+              goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "unsupported", provider_error: "Checks Unsupported (GoPlus)" });
+              continue;
+            }
             const err = `Checks Limited (GoPlus code ${Number.isFinite(code) ? code : "unknown"}${message ? `: ${message}` : ""})`;
             goByToken.set(`${chainId}:${a}`.toLowerCase(), { status: "stale", provider_error: err });
             continue;

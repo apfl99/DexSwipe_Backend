@@ -10,6 +10,11 @@
 
 토큰 카드 피드 조회 API.
 
+- **지원 체인(Intersection Rule)**  
+  DexScreener는 매우 많은 체인을 지원하지만, DexSwipe는 **GoPlus Security로 검증 가능한 체인만** 적재/노출합니다.
+  - Allowlist: `solana, base, bsc, ethereum, arbitrum, polygon, avalanche, tron`
+  - 위 리스트에 없는 체인(예: `sui`, `aptos`, `ton`)은 **적재 단계에서 즉시 드롭**되며, `chains=`로 요청해도 결과는 비어있습니다.
+
 - **Headers**
   - `x-client-id`: 클라이언트/디바이스 식별자(필수). seen 제외(anti-join)에 사용됩니다.
 
@@ -17,7 +22,7 @@
   - `format`: `full|min` (기본 `full`)
   - `limit`: 1~20 (기본 20, 실시간 병합 비용 제한)
   - `cursor`: ISO timestamp (선택). `updated_at < cursor` 범위를 가져옵니다.
-  - `chains`: `solana,base` 형태
+  - `chains`: `solana,base` 형태 (지원 체인만 허용)
   - `min_liquidity_usd`: 최소 유동성(USD)
   - `min_volume_24h`: 24h 거래량 최소값(USD)
   - `min_fdv`: FDV 최소값(USD)
