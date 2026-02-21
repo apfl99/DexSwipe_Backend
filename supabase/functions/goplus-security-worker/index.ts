@@ -1,5 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { getPlanConfig } from "../_shared/plan.ts";
+import { getGoPlusAccessToken } from "../_shared/goplus_auth.ts";
 
 type MappingRow = {
   dexscreener_chain_id: string;
@@ -144,18 +146,32 @@ Deno.serve(async (req) => {
   }
   const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
 
-  const apiKey = Deno.env.get("GOPLUS_API_KEY") ?? null;
-  const cuBudget = (() => {
-    const v = Deno.env.get("GOPLUS_CU_BUDGET_PER_RUN") ?? "300";
-    const n = Number.parseInt(v, 10);
-    return Number.isFinite(n) && n > 0 ? n : 300;
-  })();
+  const auth = await getGoPlusAccessToken(supabase);
+  const apiKey = auth.token;
+  const plan = getPlanConfig();
+  const cuBudget = plan.goplus_cu_budget_per_run;
   let cuUsed = 0;
-  const cacheTtlHours = (() => {
-    const v = Deno.env.get("GOPLUS_CACHE_TTL_HOURS") ?? "6";
-    const n = Number.parseInt(v, 10);
-    return Number.isFinite(n) && n > 0 ? n : 6;
+  const cacheTtlHours = plan.goplus_cache_ttl_hours;
+  const dailyMaxScans = plan.goplus_daily_max_scans;
+  const utcDayStart = (() => {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return d;
   })();
+  const utcTomorrowStart = (() => {
+    const d = new Date(utcDayStart.getTime() + 24 * 60 * 60 * 1000);
+    return d;
+  })();
+
+  // FREE daily scan cap guardrail (counts total security scans today; with FREE TTL=24h this ~= 신규 스캔 상한)
+  let scansToday = 0;
+  if (dailyMaxScans !== null) {
+    const c = await supabase
+      .from("goplus_token_security_cache")
+      .select("scanned_at", { count: "exact", head: true })
+      .gte("scanned_at", utcDayStart.toISOString());
+    scansToday = !c.error ? c.count ?? 0 : 0;
+  }
 
   const batchSize = (() => {
     const u = new URL(req.url);
@@ -185,15 +201,11 @@ Deno.serve(async (req) => {
     const jobs = (dq.data ?? []) as Array<{ chain_id: string; token_address: string; attempts: number }>;
     if (jobs.length === 0) break;
 
-    for (const job of jobs) {
+    for (let idx = 0; idx < jobs.length; idx++) {
+      const job = jobs[idx];
       if (total >= MAX_JOBS_PER_INVOCATION) break;
       const jobCu = estimateCu(job.chain_id);
-      if (cuUsed + jobCu > cuBudget) {
-        // Stop this invocation; remaining jobs will be picked up next cron run.
-        break;
-      }
       total++;
-      cuUsed += jobCu;
 
       const chainId = job.chain_id;
       const tokenAddress = job.token_address;
@@ -207,6 +219,25 @@ Deno.serve(async (req) => {
           .eq("token_address", tokenAddress)
           .maybeSingle();
         if (!cached.error && cached.data?.scanned_at) {
+          // Scam permanence: if always_deny is true, never spend CU again on this token.
+          if ((cached.data as any)?.always_deny === true) {
+            await supabase
+              .from("token_security_scan_queue")
+              .update({
+                status: "completed",
+                attempts: job.attempts,
+                locked_at: null,
+                updated_at: new Date().toISOString(),
+                last_error: null,
+                last_scanned_at: new Date().toISOString(),
+                next_run_at: new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000).toISOString(),
+              })
+              .eq("chain_id", chainId)
+              .eq("token_address", tokenAddress);
+            processed.push({ chain_id: chainId, token_address: tokenAddress, ok: true, always_deny: true });
+            continue;
+          }
+
           const scannedAtMs = new Date(cached.data.scanned_at as string).getTime();
           if (Number.isFinite(scannedAtMs) && Date.now() - scannedAtMs < cacheTtlHours * 60 * 60 * 1000) {
             await supabase
@@ -218,7 +249,7 @@ Deno.serve(async (req) => {
                 updated_at: new Date().toISOString(),
                 last_error: null,
                 last_scanned_at: new Date().toISOString(),
-                next_run_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+                next_run_at: new Date(Date.now() + cacheTtlHours * 60 * 60 * 1000).toISOString(),
               })
               .eq("chain_id", chainId)
               .eq("token_address", tokenAddress);
@@ -228,6 +259,53 @@ Deno.serve(async (req) => {
               ok: true,
               always_deny: (cached.data as any)?.always_deny ?? false,
             });
+            continue;
+          }
+        }
+
+        // Daily scan cap (FREE): defer remaining jobs to tomorrow (no CU waste).
+        if (dailyMaxScans !== null && scansToday >= dailyMaxScans) {
+          await supabase
+            .from("token_security_scan_queue")
+            .update({
+              status: "completed",
+              locked_at: null,
+              updated_at: new Date().toISOString(),
+              last_error: "daily_scan_cap_free",
+              next_run_at: new Date(utcTomorrowStart.getTime() + 5 * 60 * 1000).toISOString(),
+            })
+            .eq("chain_id", chainId)
+            .eq("token_address", tokenAddress);
+          processed.push({ chain_id: chainId, token_address: tokenAddress, ok: true });
+          continue;
+        }
+
+        // Dead Token Drop: if there's no meaningful market activity for 24h, do not rescan forever.
+        // (Best-effort approximation: updated_at older than 24h and volume_24h is 0/null.)
+        const market = await supabase
+          .from("tokens")
+          .select("volume_24h,updated_at")
+          .eq("chain_id", chainId)
+          .eq("token_address", tokenAddress)
+          .maybeSingle();
+        if (!market.error && market.data?.updated_at) {
+          const updatedAtMs = new Date((market.data as any).updated_at as string).getTime();
+          const vol = (market.data as any).volume_24h;
+          const volNum = typeof vol === "number" ? vol : typeof vol === "string" ? Number.parseFloat(vol) : NaN;
+          const isDead = Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs >= 24 * 60 * 60 * 1000 && (!Number.isFinite(volNum) || volNum <= 0);
+          if (isDead) {
+            await supabase
+              .from("token_security_scan_queue")
+              .update({
+                status: "completed",
+                locked_at: null,
+                updated_at: new Date().toISOString(),
+                last_error: "dead_token_drop",
+                next_run_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+              })
+              .eq("chain_id", chainId)
+              .eq("token_address", tokenAddress);
+            processed.push({ chain_id: chainId, token_address: tokenAddress, ok: true });
             continue;
           }
         }
@@ -249,6 +327,28 @@ Deno.serve(async (req) => {
               encodeURIComponent(tokenAddress)
             }`;
         }
+
+        // CU budget guardrail: if we cannot afford this job, defer this and all remaining dequeued jobs.
+        if (cuUsed + jobCu > cuBudget) {
+          const nextRunAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+          for (let j = idx; j < jobs.length; j++) {
+            const x = jobs[j];
+            await supabase
+              .from("token_security_scan_queue")
+              .update({
+                status: "completed",
+                locked_at: null,
+                updated_at: new Date().toISOString(),
+                last_error: "cu_budget_exhausted",
+                next_run_at: nextRunAt,
+              })
+              .eq("chain_id", x.chain_id)
+              .eq("token_address", x.token_address);
+            processed.push({ chain_id: x.chain_id, token_address: x.token_address, ok: true });
+          }
+          break;
+        }
+        cuUsed += jobCu;
 
         const payload = await fetchGoPlusJson(url, apiKey);
         const envelope: any = payload && typeof payload === "object" ? payload : null;
@@ -355,6 +455,9 @@ Deno.serve(async (req) => {
           );
         if (up.error) throw new Error(`cache upsert failed: ${up.error.message}`);
 
+        // If we actually called GoPlus, increment today's scan counter (for FREE cap).
+        if (dailyMaxScans !== null) scansToday++;
+
         const q = await supabase
           .from("token_security_scan_queue")
           .update({
@@ -364,8 +467,10 @@ Deno.serve(async (req) => {
             updated_at: new Date().toISOString(),
             last_error: null,
             last_scanned_at: new Date().toISOString(),
-            // re-scan policy can be tuned later; default 6h
-            next_run_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+            // Scam permanence: never rescan always_deny tokens.
+            next_run_at: policy.always_deny
+              ? new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000).toISOString()
+              : new Date(Date.now() + cacheTtlHours * 60 * 60 * 1000).toISOString(),
           })
           .eq("chain_id", chainId)
           .eq("token_address", tokenAddress);
@@ -421,6 +526,7 @@ Deno.serve(async (req) => {
         processed.push({ chain_id: job.chain_id, token_address: job.token_address, ok: false, error: msg });
       }
     }
+    if (cuUsed >= cuBudget) break;
   }
 
   // Heartbeat row: proves the worker ran (cron vs manual).
@@ -428,7 +534,7 @@ Deno.serve(async (req) => {
   await supabase.from("edge_function_heartbeats").insert({
     function_name: "goplus-security-worker",
     processed_count: processed.length,
-    note: `${apiKey ? "api_key_set" : "api_key_missing"};cu=${cuUsed}/${cuBudget}`,
+    note: `${apiKey ? "api_key_set" : "api_key_missing"};auth=${auth.source}${auth.note ? `(${auth.note})` : ""};tier=${plan.tier};cu=${cuUsed}/${cuBudget};scansToday=${scansToday}${dailyMaxScans !== null ? `/${dailyMaxScans}` : ""}`,
   });
 
   return json({

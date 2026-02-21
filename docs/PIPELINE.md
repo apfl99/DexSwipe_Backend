@@ -33,7 +33,8 @@
 - **출력 테이블**: `public.dexscreener_market_update_queue`
 - **체인 전략(현재)**
   - **항상**: Solana, Base
-  - **교차**: Sui, Tron (1:1 라운드로빈)
+  - **회전(Round-Robin)**: `ethereum, bsc, arbitrum, polygon, avalanche, tron` 중 1개를 5분 버킷 기준으로 교대
+  - (Intersection Rule) 위 8개 Allowlist 외 체인은 큐/DB 단계에서 차단됩니다.
 
 #### 2) Market 스냅샷 적재(하이프 필터 포함)
 
@@ -45,6 +46,12 @@
   - 변동: `price_change_5m`, `price_change_15m`, `price_change_1h`
   - 메타: `symbol`, `logo_url`, `website_url`, `last_fetched_at`, `updated_at`
 - **필터(저장 단계)**: 유동성/거래량이 낮은 후보는 저장 단계에서 드랍하여 DB를 lean하게 유지
+  - `GOPLUS_PLAN_TIER=FREE`:
+    - `liquidity_usd > 10,000`
+    - `volume_24h > 50,000`
+  - `GOPLUS_PLAN_TIER=PRO`:
+    - `liquidity_usd > 2,000`
+    - `volume_24h > 5,000`
 
 #### 3) GoPlus 보안/품질 갱신(캐시 중심)
 
@@ -53,11 +60,18 @@
   - **캐시**: `public.goplus_token_security_cache`
   - **저장 필드(핵심)**: `is_honeypot`, `buy_tax`, `sell_tax`, `trust_list`, `is_blacklisted` (+ raw)
   - **큐**: `public.token_security_scan_queue` (dequeue RPC 기반)
+  - **비용 최적화(공통)**
+    - **Scam Permanence**: `always_deny=true`(예: honeypot/blacklisted/전량매도불가/세금폭탄)로 확정된 토큰은 **영구 캐시** 처리되어 재스캔하지 않습니다.
+    - **Dead Token Drop**: 시장 데이터가 24h 이상 업데이트되지 않고 `volume_24h=0/null`인 토큰은 캐시 만료 후에도 **재스캔 큐에서 영구 제외**합니다(최소 비용으로 노이즈 제거).
+  - **FREE 모드 상한**
+    - 워커 1회 실행 CU 예산: 100 (30분 크론 기준 하루 48회 → 이론상 4,800 CU/day 상한)
+    - 일일 스캔 캡: 150 (캡 초과 시 다음날로 연기)
 
 - **품질(URL/rugpull)**
   - **함수**: `supabase/functions/goplus-quality-worker/index.ts`
   - **캐시**: `public.goplus_url_risk_cache`, `public.goplus_rugpull_cache`
   - **큐**: `public.token_quality_scan_queue`
+  - **FREE 모드**: CU 생존을 위해 워커가 **비활성화**됩니다(기존 캐시가 있으면 그대로 사용).
 
 ---
 
@@ -110,8 +124,8 @@
 ### 스케줄(크론) 요약
 
 - **`dexswipe_scheduled_fetch_every_5m`**: `*/5 * * * *` → `scheduled-fetch`
-- **`dexswipe_market_worker_every_5m`**: `*/5 * * * *` → `fetch-dexscreener-market`
-- **`goplus_security_worker_every_5m`**: `*/5 * * * *` → `goplus-security-worker`
+- **`dexscreener_market_every_15m`**: `*/15 * * * *` → `fetch-dexscreener-market`
+- **`goplus_security_worker_every_30m`**: `*/30 * * * *` → `goplus-security-worker`
 - **`goplus_quality_worker_every_2h`**: `0 */2 * * *` → `goplus-quality-worker`
 - **`dexswipe_gc_tokens_daily_midnight_utc`**: `0 0 * * *` → 24h TTL(위시리스트 제외)
 - **`dexswipe_cleanup_daily_430am_kst`**: 매일 04:30 KST(보조 정리/TTL)
@@ -149,7 +163,11 @@
   - `DEXSWIPE_CRON_SECRET` (Edge Functions 보호용 헤더 `x-cron-secret`)
 - **외부 API**
   - `GOPLUS_API_KEY` (없으면 일부 호출이 제한될 수 있음)
-- (선택) 하이프/캐시 튜닝: `.env.example` 참고
+- **플랜/비용 모드 스위치**
+  - `GOPLUS_PLAN_TIER=FREE|PRO` (한 번 바꾸고 재시작하면 즉시 정책/임계값 전환)
+    - FREE: HTTP API에서 GoPlus 라이브 호출 금지(캐시+큐 기반)
+    - PRO: HTTP API에서 stale/missing에 대해 GoPlus 배치 라이브 병합 허용
+- (선택) 고급 튜닝: `.env.example` 참고
 
 ---
 

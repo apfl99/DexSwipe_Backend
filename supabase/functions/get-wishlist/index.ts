@@ -1,6 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { fetchJsonWithRetry } from "../_shared/dexscreener.ts";
+import { getPlanConfig } from "../_shared/plan.ts";
+import { getGoPlusAccessToken } from "../_shared/goplus_auth.ts";
 
 function json(body: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(body), {
@@ -448,6 +450,7 @@ Deno.serve(async (req) => {
     return json({ error: "missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" }, { status: 500 });
   }
   const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
+  const plan = getPlanConfig();
 
   const u = new URL(req.url);
   const limit = Math.min(Math.max(Number.parseInt(u.searchParams.get("limit") ?? "100", 10) || 100, 1), 200);
@@ -553,7 +556,7 @@ Deno.serve(async (req) => {
   const mappings = new Map<string, { goplus_mode: string; goplus_chain_id: string | null }>();
   if (!mappingsRes.error) for (const r of mappingsRes.data ?? []) mappings.set((r as any).dexscreener_chain_id, r as any);
 
-  const apiKey = Deno.env.get("GOPLUS_API_KEY") ?? null;
+  let apiKey: string | null = null;
   const goByToken = new Map<string, any>();
 
   // Group wishlist targets by chain
@@ -581,7 +584,7 @@ Deno.serve(async (req) => {
         .eq("chain_id", chainId)
         .in("token_address", addrs);
 
-      const freshMs = 6 * 60 * 60 * 1000;
+      const freshMs = plan.goplus_cache_ttl_hours * 60 * 60 * 1000;
       const need: string[] = [];
       if (!cached.error) {
         for (const row of cached.data ?? []) {
@@ -603,6 +606,20 @@ Deno.serve(async (req) => {
       // IMPORTANT: Do not lowercase Solana addresses (case-sensitive).
       const uniqNeed = Array.from(new Set(need));
       if (uniqNeed.length === 0) return;
+
+      // FREE 생존 모드: HTTP API에서 GoPlus 라이브 호출 금지 (캐시+큐 기반)
+      if (!plan.goplus_allow_live_fetch_in_http_apis) {
+        for (const a of uniqNeed) {
+          const k = `${chainId}:${a}`.toLowerCase();
+          if (!goByToken.has(k)) goByToken.set(k, { status: "scanning", provider_error: "Checks Pending (queued)" });
+        }
+        return;
+      }
+
+      if (!apiKey) {
+        const auth = await getGoPlusAccessToken(supabase);
+        apiKey = auth.token;
+      }
 
       const baseUrl =
         m.goplus_mode === "solana"

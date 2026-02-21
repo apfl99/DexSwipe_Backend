@@ -6,6 +6,11 @@
 
 ### Public API
 
+- **인증(중요)**
+  - 이 프로젝트의 Edge Functions는 **JWT 검증이 비활성화**되어 있으며, 프론트엔드는 Supabase `Authorization: Bearer <jwt>`를 붙이지 않아도 됩니다.
+  - 대신, 개인화/안티조인에 필요한 **`x-client-id`** 헤더는 필수입니다.
+  - 크론/워커 엔드포인트는 **`x-cron-secret`**으로 보호됩니다(프론트에서 호출하지 않음).
+
 #### `GET /functions/v1/get-feed`
 
 토큰 카드 피드 조회 API.
@@ -77,6 +82,30 @@ Checks(완성도):
   - `unsupported`: 체인 미지원
 스캔 대상:
 - `tokens` 테이블에 저장된(=수집 품질 필터를 통과한) 토큰은 **전부** 보안/품질 스캔 큐에 enqueue 됩니다. (유동성/거래량 기반의 별도 제한 없음)
+플랜/비용 모드(중요):
+- 백엔드는 `GOPLUS_PLAN_TIER=FREE|PRO`에 따라 GoPlus 사용 전략이 달라집니다.
+  - **FREE(월 150k CU 생존 모드)**: `get-feed/get-wishlist`는 **GoPlus를 라이브 호출하지 않습니다.**  
+    즉, 신규 토큰은 캐시가 채워지기 전까지 `checks_state=pending` / `safety_score=null`로 내려오며, 백그라운드 워커가 채웁니다.
+    - (추가) FREE에서는 **GoPlus 품질(URL/러그) 워커를 비활성화**하여 CU를 “절대” 낭비하지 않도록 보수적으로 운영합니다. 따라서 `url_*`/`rug_*` 신호는 cold-start에서 null일 수 있습니다.
+  - **PRO(월 6M CU)**: `get-feed/get-wishlist`에서 **캐시가 stale/없을 때 GoPlus를 배치로 라이브 병합**해 즉시 `complete`로 수렴할 수 있습니다.
+
+GoPlus 인증(중요, CU 차감 이슈 관련):
+- GoPlus Token Security API는 기본적으로 `Authorization: Bearer <access_token>` 형태를 사용합니다.
+- access_token은 GoPlus의 Access Token API(`/api/v1/token`)에서 **`app_key` + `sign(sha1(app_key+time+app_secret))` + `time`**로 발급됩니다.
+- DexSwipe는 아래 우선순위로 토큰을 선택합니다.
+  1) `GOPLUS_ACCESS_TOKEN` (직접 주입)
+  2) `GOPLUS_APP_KEY` + `GOPLUS_APP_SECRET` (자동 발급/갱신, 권장)
+  3) `GOPLUS_API_KEY` (레거시: **access_token**을 넣어야 함. AppKey를 넣으면 인증/과금이 정상 동작하지 않을 수 있음)
+
+운영 시크릿 설정(권장):
+
+```bash
+# GoPlus 운영 키(권장: AppKey/Secret 기반 자동 토큰 발급/갱신)
+supabase secrets set GOPLUS_APP_KEY="..." GOPLUS_APP_SECRET="..."
+
+# 생존 모드/프로 모드 스위치
+supabase secrets set GOPLUS_PLAN_TIER=FREE
+```
 Score 표기:
 - GoPlus 검증이 **완료(complete)** 되지 않은 상태(`pending|limited|unsupported`)에서는 `safety_score`는 **null**로 내려오며,
   프론트에서는 **`"-"`(미표기)** 로 렌더링하는 것을 권장합니다.
@@ -135,7 +164,7 @@ curl -sS -H "x-client-id: device-abc" \
   - `captured_price`(저장 시점) + `current_price`(현재 시점)를 함께 반환합니다.
   - `roi_since_captured`도 함께 내려주지만, 프론트에서 즉시 재계산해도 됩니다.
   - GoPlus 보안 필드도 병합하여 반환합니다(`goplus_*`).
-  - `safety_score`는 **감점제(Deduction Model)**로 산정되며, 데이터 누락/실패 시 **100을 절대 반환하지 않고** `50(Unknown)` 또는 `null`로 처리합니다.
+  - `safety_score`는 **감점제(Deduction Model)**로 산정되며, GoPlus 검증이 완료되지 않으면(`checks_state != complete`) **항상 null**입니다. (100을 기본값으로 절대 반환하지 않음)
   - 상세 사유는 `risk_factors: string[]`로 내려옵니다.
   - URL 분리 필드(`dex_chart_url`, `official_website_url`, `twitter_url`, `telegram_url`) 및 `urls` 객체가 함께 내려옵니다.
   - `checks_state`를 함께 내려 프론트에서 “Checks LIMITED/COMPLETE” 등을 안정적으로 표시할 수 있습니다.

@@ -1,5 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { getPlanConfig } from "../_shared/plan.ts";
+import { getGoPlusAccessToken } from "../_shared/goplus_auth.ts";
 
 type MappingRow = {
   dexscreener_chain_id: string;
@@ -78,8 +80,21 @@ Deno.serve(async (req) => {
     return json({ error: "missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" }, { status: 500 });
   }
   const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
+  const plan = getPlanConfig();
 
-  const apiKey = Deno.env.get("GOPLUS_API_KEY") ?? null;
+  // FREE survival mode: quality endpoints CU cost is not transparent; disable to guarantee <5k CU/day overall.
+  // (Security worker is the only GoPlus consumer in FREE mode.)
+  if (plan.tier === "FREE") {
+    await supabase.from("edge_function_heartbeats").insert({
+      function_name: "goplus-quality-worker",
+      processed_count: 0,
+      note: "disabled_in_free_plan_tier",
+    });
+    return json({ ok: true, processed_count: 0, processed: [], note: "disabled in FREE plan tier (CU survival mode)" });
+  }
+
+  const auth = await getGoPlusAccessToken(supabase);
+  const apiKey = auth.token;
   const linkTtlHours = (() => {
     const v = Deno.env.get("GOPLUS_LINK_TTL_HOURS") ?? "24";
     const n = Number.parseInt(v, 10);

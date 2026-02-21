@@ -20,6 +20,8 @@ paths:
         - Pagination: cursor (keyset) using `tokens.updated_at`
         - Anti-join: excludes already seen tokens via `seen_tokens(user_device_id, token_id)`
         - Risk filter: excludes security/risky tokens unless `include_risky=true`
+        - Note: Depending on server's GoPlus plan tier, GoPlus fields may be cache-only. In that case, tokens can stay `checks_state=pending` (and `safety_score=null`) until background workers complete scans.
+        - GoPlus auth: Token Security API expects `Authorization: Bearer <access_token>`. The server can mint/refresh the access token via GoPlus Access Token API (`/api/v1/token`) using `app_key + sign(sha1(app_key+time+app_secret)) + time`.
       parameters:
         - in: header
           name: x-client-id
@@ -184,6 +186,11 @@ paths:
   /functions/v1/get-wishlist:
     get:
       summary: Get wishlist (live price sync + GoPlus merge)
+      description: |
+        Returns wishlist items with live DexScreener prices and merged GoPlus signals.
+        - If GoPlus checks are not complete yet, `checks_state` can be `pending|limited|unsupported` and `safety_score` will be null.
+        - Depending on server's GoPlus plan tier, GoPlus signals may be served cache-only (no live calls from this endpoint).
+        - GoPlus auth: Token Security API expects `Authorization: Bearer <access_token>`. The server can mint/refresh the access token via GoPlus Access Token API (`/api/v1/token`) using `app_key + sign(sha1(app_key+time+app_secret)) + time`.
       parameters:
         - in: header
           name: x-client-id
@@ -366,7 +373,22 @@ components:
 
     WishlistItem:
       type: object
-      required: [token_id, chain_id, token_address, captured_price, current_price, roi_since_captured, safety_score, is_surging, updated_at, goplus_status]
+      required:
+        [
+          token_id,
+          chain_id,
+          token_address,
+          captured_price,
+          current_price,
+          roi_since_captured,
+          safety_score,
+          is_security_risk,
+          risk_factors,
+          checks_state,
+          is_surging,
+          updated_at,
+          goplus_status
+        ]
       properties:
         token_id: { type: string }
         chain_id: { type: string }
@@ -404,7 +426,7 @@ components:
           description: "GoPlus merge status: live|cached|stale|pending|limited|unsupported"
         checks_state:
           type: string
-          description: "Checks completeness: pending|complete|limited|unsupported"
+          description: "Checks completeness: pending|complete|limited|unsupported. When not complete, safety_score and all goplus_* detail fields are null."
         goplus_is_honeypot: { type: boolean, nullable: true }
         goplus_is_blacklisted: { type: boolean, nullable: true }
         goplus_cannot_sell_all: { type: boolean, nullable: true }

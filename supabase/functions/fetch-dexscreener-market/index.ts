@@ -2,6 +2,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { fetchJsonWithRetry } from "../_shared/dexscreener.ts";
+import { getPlanConfig } from "../_shared/plan.ts";
 
 type Pair = Record<string, unknown> & {
   chainId?: string;
@@ -143,17 +144,10 @@ Deno.serve(async (req) => {
   }
   const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
 
-  // Hype filter: keep DB lean by only persisting tokens meeting quality threshold.
-  const hypeMinLiquidityUsd = (() => {
-    const v = Deno.env.get("HYPE_MIN_LIQUIDITY_USD") ?? "10000";
-    const n = Number.parseFloat(v);
-    return Number.isFinite(n) && n >= 0 ? n : 10000;
-  })();
-  const hypeMinTxns1h = (() => {
-    const v = Deno.env.get("HYPE_MIN_TXNS_1H") ?? "10";
-    const n = Number.parseInt(v, 10);
-    return Number.isFinite(n) && n >= 0 ? n : 10;
-  })();
+  // Plan-driven pre-filter (FREE vs PRO)
+  const plan = getPlanConfig();
+  const prefilterMinLiquidityUsd = plan.dexscreener_min_liquidity_usd;
+  const prefilterMinVolume24hUsd = plan.dexscreener_min_volume_24h_usd;
 
   const supportedChainsRes = await supabase.from("chain_mappings").select("dexscreener_chain_id");
   const supportedSecurityChains = new Set<string>(
@@ -284,9 +278,12 @@ Deno.serve(async (req) => {
             const pair_created_at = pairCreatedAtMs ? new Date(pairCreatedAtMs).toISOString() : null;
             const tokenId = `${chain}:${it.token}`;
 
-            // Apply hype filter before persisting into the lean `tokens` table.
-            const liqForHype = liquidity_usd ?? 0;
-            if (liqForHype >= hypeMinLiquidityUsd && txns_1h > hypeMinTxns1h) {
+            // Apply plan-driven pre-filter before persisting into the lean `tokens` table.
+            // FREE: liquidity > 10k, volume_24h > 50k
+            // PRO : liquidity > 2k,  volume_24h > 5k
+            const liq = liquidity_usd ?? 0;
+            const vol24 = volume_24h ?? 0;
+            if (liq > prefilterMinLiquidityUsd && vol24 > prefilterMinVolume24hUsd) {
               const profileIcon = profileIconByToken.get(profileKey(chain, it.token)) ?? null;
               const baseAddr = typeof best.baseToken?.address === "string" ? best.baseToken.address : "";
               const quoteAddr = typeof best.quoteToken?.address === "string" ? best.quoteToken.address : "";
